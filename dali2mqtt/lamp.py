@@ -2,6 +2,7 @@
 import json
 import logging
 
+import dali.address as address
 import dali.gear.general as gear
 from dali2mqtt.consts import (
     ALL_SUPPORTED_LOG_LEVELS,
@@ -36,28 +37,43 @@ class Lamp:
         self.driver = driver
         self.short_address = short_address
         self.friendly_name = friendly_name
+        self.is_group = isinstance(short_address, address.Group)
 
         self.device_name = slugify(friendly_name)
 
         logger.setLevel(ALL_SUPPORTED_LOG_LEVELS[log_level])
 
-        _min_physical_level = driver.send(gear.QueryPhysicalMinimum(short_address))
-
-        try:
-            self.min_physical_level = _min_physical_level.value
-        except Exception as err:
+        # Groups don't support query operations, use defaults
+        if self.is_group:
             self.min_physical_level = None
-            logger.warning("Set min_physical_level to None as %s failed: %s", _min_physical_level, err)
-        self.min_level = driver.send(gear.QueryMinLevel(short_address)).value
-        self.max_level = driver.send(gear.QueryMaxLevel(short_address)).value
-        self.level = driver.send(gear.QueryActualLevel(short_address)).value
+            self.min_level = 1  # Standard DALI minimum
+            self.max_level = 254  # Standard DALI maximum
+            # Set level directly without calling setter (which would send DAPC command)
+            self.__level = 0  # Default to off, can't query actual level for groups
+            logger.debug("Initialized group lamp %s with default values", friendly_name)
+        else:
+            _min_physical_level = driver.send(gear.QueryPhysicalMinimum(short_address))
+
+            try:
+                self.min_physical_level = _min_physical_level.value
+            except Exception as err:
+                self.min_physical_level = None
+                logger.warning("Set min_physical_level to None as %s failed: %s", _min_physical_level, err)
+            self.min_level = driver.send(gear.QueryMinLevel(short_address)).value
+            self.max_level = driver.send(gear.QueryMaxLevel(short_address)).value
+            self.level = driver.send(gear.QueryActualLevel(short_address)).value
 
     def gen_ha_config(self, mqtt_base_topic):
         """Generate a automatic configuration for Home Assistant."""
+        # Generate unique ID for both Short and Group addresses
+        if self.is_group:
+            uniq_id = f"{type(self.driver).__name__}_group_{self.short_address}"
+        else:
+            uniq_id = f"{type(self.driver).__name__}_{self.short_address.address}"
         json_config = {
             "name": self.friendly_name,
             "def_ent_id": f"dali_light_{self.device_name}",
-            "uniq_id": f"{type(self.driver).__name__}_{self.short_address}",
+            "uniq_id": uniq_id,
             "stat_t": MQTT_STATE_TOPIC.format(mqtt_base_topic, self.device_name),
             "cmd_t": MQTT_COMMAND_TOPIC.format(mqtt_base_topic, self.device_name),
             "pl_off": MQTT_PAYLOAD_OFF.decode("utf-8"),
@@ -84,6 +100,10 @@ class Lamp:
 
     def actual_level(self):
         """Retrieve actual level from ballast."""
+        if self.is_group:
+            # Groups don't support query operations, keep current level
+            logger.debug("Cannot query actual level for group %s", self.friendly_name)
+            return
         self.__level = self.driver.send(gear.QueryActualLevel(self.short_address))
 
     @property
@@ -108,8 +128,13 @@ class Lamp:
 
     def __str__(self):
         """Serialize lamp information."""
+        # Handle both Short (has .address) and Group (no .address) objects
+        if self.is_group:
+            addr_str = str(self.short_address)
+        else:
+            addr_str = str(self.short_address.address)
         return (
-            f"{self.device_name} - address: {self.short_address.address}, "
+            f"{self.device_name} - address: {addr_str}, "
             f"actual brightness level: {self.level} (minimum: {self.min_level}, "
             f"max: {self.max_level}, physical minimum: {self.min_physical_level})"
         )
