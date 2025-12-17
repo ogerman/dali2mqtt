@@ -110,3 +110,27 @@ def test_group_lamp_str():
     assert "group-1" in str_repr
     assert "<group 1>" in str_repr or "group 1" in str_repr
     assert "actual brightness level:" in str_repr
+
+
+def test_lamp_initialization_short_and_group():
+    """Test that both Short and Group addresses initialize correctly."""
+    # Short address
+    mock_driver_short = mock.Mock()
+    mock_result = mock.Mock()
+    mock_result.value = 100
+    mock_driver_short.send = mock.Mock(return_value=mock_result)
+
+    lamp_short = Lamp("debug", mock_driver_short, "lamp 1", Short(1))
+    assert not lamp_short.is_group
+    assert lamp_short.min_level == 100
+    assert lamp_short.max_level == 100
+
+    # Group address
+    mock_driver_group = mock.Mock()
+    mock_driver_group.send = mock.Mock(return_value=None)
+
+    lamp_group = Lamp("debug", mock_driver_group, "group 1", Group(1))
+    assert lamp_group.is_group
+    assert lamp_group.min_level == 1
+    assert lamp_group.max_level == 254
+    assert lamp_group.level == 0
