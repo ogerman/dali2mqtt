@@ -3,7 +3,7 @@
 from dali2mqtt.lamp import Lamp
 from dali2mqtt.consts import __version__
 from unittest import mock
-from dali.address import Short
+from dali.address import Short, Group
 import pytest
 import json
 from slugify import slugify
@@ -13,6 +13,7 @@ MIN_BRIGHTNESS = 2
 MAX_BRIGHTNESS = 250
 ACTUAL_BRIGHTNESS = 100
 
+
 def generate_driver_values(results):
     for res in results:
         result = mock.Mock()
@@ -20,10 +21,14 @@ def generate_driver_values(results):
         print(result.value)
         yield result
 
+
 @pytest.fixture
 def fake_driver():
     drive = mock.Mock()
-    drive.dummy = generate_driver_values([MIN__PHYSICAL_BRIGHTNESS, MIN_BRIGHTNESS, MAX_BRIGHTNESS, ACTUAL_BRIGHTNESS, ACTUAL_BRIGHTNESS])
+    drive.dummy = generate_driver_values([
+        MIN__PHYSICAL_BRIGHTNESS, MIN_BRIGHTNESS, MAX_BRIGHTNESS,
+        ACTUAL_BRIGHTNESS, ACTUAL_BRIGHTNESS
+    ])
     drive.send = lambda x: next(drive.dummy)
     return drive
 
@@ -33,6 +38,7 @@ def fake_address():
     address = mock.Mock()
     address.address = 1
     address.__repr__ = lambda: "1"
+
 
 def test_ha_config(fake_driver, fake_address):
 
@@ -50,7 +56,11 @@ def test_ha_config(fake_driver, fake_address):
     assert lamp1.device_name == slugify(friendly_name)
     assert lamp1.short_address.address == addr_number
 
-    assert str(lamp1) == f'my-lamp - address: {addr_number}, actual brightness level: {ACTUAL_BRIGHTNESS} (minimum: {MIN_BRIGHTNESS}, max: {MAX_BRIGHTNESS}, physical minimum: {MIN__PHYSICAL_BRIGHTNESS})'
+    assert str(lamp1) == (
+        f'my-lamp - address: {addr_number}, actual brightness level: '
+        f'{ACTUAL_BRIGHTNESS} (minimum: {MIN_BRIGHTNESS}, max: {MAX_BRIGHTNESS}, '
+        f'physical minimum: {MIN__PHYSICAL_BRIGHTNESS})'
+    )
 
     assert json.loads(lamp1.gen_ha_config("test")) == {
         "name": friendly_name,
@@ -74,3 +84,29 @@ def test_ha_config(fake_driver, fake_address):
             "mf": "dali2mqtt",
         },
     }
+
+
+def test_group_lamp_str():
+    """Test __str__ method for Group addresses."""
+    friendly_name = "group 1"
+    group_addr = Group(1)
+
+    # Create a mock driver that returns mock responses for query operations
+    mock_driver = mock.Mock()
+    mock_result = mock.Mock()
+    mock_result.value = 100  # For actual level query
+    mock_driver.send = mock.Mock(return_value=mock_result)
+
+    lamp_group = Lamp(
+        log_level="debug",
+        driver=mock_driver,
+        friendly_name=friendly_name,
+        short_address=group_addr,
+    )
+
+    # __str__ should work without AttributeError
+    # Group string representation is "<group 1>"
+    str_repr = str(lamp_group)
+    assert "group-1" in str_repr
+    assert "<group 1>" in str_repr or "group 1" in str_repr
+    assert "actual brightness level:" in str_repr

@@ -42,6 +42,7 @@ def config():
         "log_color": False,
     }
 
+
 @pytest.fixture
 def fake_data_object():
     driver = mock.Mock()
@@ -55,11 +56,12 @@ def fake_data_object():
         "devices_names_config": None
     }
 
+
 @pytest.fixture
 def fake_mqttc():
     mqttc = mock.Mock()
+
     def loop_forever():
-        import sys
         raise Exception()
     mqttc.loop_forever = loop_forever
     return mqttc

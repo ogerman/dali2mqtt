@@ -1,0 +1,29 @@
+services:
+  dali2mqtt:
+    image: ghcr.io/ogerman/dali2mqtt:latest
+    # Or use a specific version:
+    # image: ghcr.io/ogerman/dali2mqtt:0.4
+    container_name: dali2mqtt
+    restart: unless-stopped
+    
+    # Mount config directory
+    volumes:
+      - ./config:/config
+      # Note: devices.yaml is created in /srv by default (working directory)
+      # To put it in /config, add this to your config.yaml:
+      # devices_names: /config/devices.yaml
+    
+    # Pass USB device for Hasseb DALI controller
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+    
+    # Or use privileged mode if needed (less secure)
+    # privileged: true
+    
+    # Environment variables (optional)
+    environment:
+      - LOGLEVEL=info
+    
+    # Network mode if needed
+    # network_mode: host
+
