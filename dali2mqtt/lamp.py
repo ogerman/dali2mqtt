@@ -2,6 +2,7 @@
 import json
 import logging
 
+import dali.address as address
 import dali.gear.general as gear
 from dali2mqtt.consts import (
     ALL_SUPPORTED_LOG_LEVELS,
@@ -36,6 +37,7 @@ class Lamp:
         self.driver = driver
         self.short_address = short_address
         self.friendly_name = friendly_name
+        self.is_group = isinstance(short_address, address.Group)
 
         self.device_name = slugify(friendly_name)
 
@@ -108,8 +110,13 @@ class Lamp:
 
     def __str__(self):
         """Serialize lamp information."""
+        # Handle both Short (has .address) and Group (no .address) objects
+        if self.is_group:
+            addr_str = str(self.short_address)
+        else:
+            addr_str = str(self.short_address.address)
         return (
-            f"{self.device_name} - address: {self.short_address.address}, "
+            f"{self.device_name} - address: {addr_str}, "
             f"actual brightness level: {self.level} (minimum: {self.min_level}, "
             f"max: {self.max_level}, physical minimum: {self.min_physical_level})"
         )
