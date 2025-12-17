@@ -1,0 +1,7 @@
+*.rules
+*.md
+*.service
+*.yml
+*.yaml
+.git
+.devcontainer
