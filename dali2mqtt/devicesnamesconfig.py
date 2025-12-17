@@ -50,9 +50,11 @@ class DevicesNamesConfig:
         """Save configuration back to yaml file."""
         self._devices_names = {}
         for lamp_object in all_lamps.values():
-            self._devices_names[lamp_object.short_address.address] = {
-                "friendly_name": str(lamp_object.short_address.address)
-            }
+            # Skip groups - they don't have .address attribute
+            if hasattr(lamp_object.short_address, 'address'):
+                self._devices_names[lamp_object.short_address.address] = {
+                    "friendly_name": str(lamp_object.short_address.address)
+                }
         try:
             with open(self._path, "w") as outfile:
                 yaml.dump(
