@@ -43,16 +43,25 @@ class Lamp:
 
         logger.setLevel(ALL_SUPPORTED_LOG_LEVELS[log_level])
 
-        _min_physical_level = driver.send(gear.QueryPhysicalMinimum(short_address))
-
-        try:
-            self.min_physical_level = _min_physical_level.value
-        except Exception as err:
+        # Groups don't support query operations, use defaults
+        if self.is_group:
             self.min_physical_level = None
-            logger.warning("Set min_physical_level to None as %s failed: %s", _min_physical_level, err)
-        self.min_level = driver.send(gear.QueryMinLevel(short_address)).value
-        self.max_level = driver.send(gear.QueryMaxLevel(short_address)).value
-        self.level = driver.send(gear.QueryActualLevel(short_address)).value
+            self.min_level = 1  # Standard DALI minimum
+            self.max_level = 254  # Standard DALI maximum
+            # Set level directly without calling setter (which would send DAPC command)
+            self.__level = 0  # Default to off, can't query actual level for groups
+            logger.debug("Initialized group lamp %s with default values", friendly_name)
+        else:
+            _min_physical_level = driver.send(gear.QueryPhysicalMinimum(short_address))
+
+            try:
+                self.min_physical_level = _min_physical_level.value
+            except Exception as err:
+                self.min_physical_level = None
+                logger.warning("Set min_physical_level to None as %s failed: %s", _min_physical_level, err)
+            self.min_level = driver.send(gear.QueryMinLevel(short_address)).value
+            self.max_level = driver.send(gear.QueryMaxLevel(short_address)).value
+            self.level = driver.send(gear.QueryActualLevel(short_address)).value
 
     def gen_ha_config(self, mqtt_base_topic):
         """Generate a automatic configuration for Home Assistant."""
@@ -86,6 +95,10 @@ class Lamp:
 
     def actual_level(self):
         """Retrieve actual level from ballast."""
+        if self.is_group:
+            # Groups don't support query operations, keep current level
+            logger.debug("Cannot query actual level for group %s", self.friendly_name)
+            return
         self.__level = self.driver.send(gear.QueryActualLevel(self.short_address))
 
     @property
