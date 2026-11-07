@@ -105,10 +105,10 @@ def test_group_lamp_str():
     )
 
     # __str__ should work without AttributeError
-    # Group string representation is "<group 1>"
+    # Address text comes from python-dali, e.g. "<group (control gear) 1>"
     str_repr = str(lamp_group)
     assert "group-1" in str_repr
-    assert "<group 1>" in str_repr or "group 1" in str_repr
+    assert f"address: {group_addr}," in str_repr
     assert "actual brightness level:" in str_repr
 
 
@@ -134,3 +134,22 @@ def test_lamp_initialization_short_and_group():
     assert lamp_group.min_level == 1
     assert lamp_group.max_level == 254
     assert lamp_group.level == 0
+
+
+@pytest.mark.parametrize(
+    "addr,expected",
+    [
+        (Short(5), "Mock_<address (control gear) 5>"),
+        (Group(1), "Mock_<group (control gear) 1>"),
+    ],
+)
+def test_ha_unique_id_is_stable(addr, expected):
+    """Home Assistant tracks entities by uniq_id, so its format must not change.
+
+    It comes from python-dali's address text, which changed in python-dali 0.10.
+    Existing HA installs use the format below.
+    """
+    driver = mock.Mock()
+    driver.send = mock.Mock(return_value=mock.Mock(value=100))
+    lamp = Lamp("debug", driver, "lamp", addr)
+    assert json.loads(lamp.gen_ha_config("dali2mqtt"))["uniq_id"] == expected
