@@ -103,7 +103,7 @@ class Lamp:
             # Groups don't support query operations, keep current level
             logger.debug("Cannot query actual level for group %s", self.friendly_name)
             return
-        self.__level = self.driver.send(gear.QueryActualLevel(self.short_address))
+        self.__level = self.driver.send(gear.QueryActualLevel(self.short_address)).value
 
     @property
     def level(self):
