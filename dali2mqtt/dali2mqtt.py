@@ -139,13 +139,14 @@ def initialize_lamps(data_object, client):
         len(lamps),
     )
 
-    def create_mqtt_lamp(address, name):
+    def create_mqtt_lamp(address, name, members=None):
         try:
             lamp_object = Lamp(
                 log_level,
                 driver,
                 name,
                 address,
+                members,
             )
 
             data_object["all_lamps"][name] = lamp_object
@@ -158,7 +159,7 @@ def initialize_lamps(data_object, client):
                 ),
                 (
                     MQTT_BRIGHTNESS_STATE_TOPIC.format(mqtt_base_topic, name),
-                    lamp_object.level,
+                    lamp_object.level_to_ha(lamp_object.level),
                     False,
                 ),
                 (
@@ -188,14 +189,17 @@ def initialize_lamps(data_object, client):
                 client.publish(topic, payload, retain)
 
             logger.info(lamp_object)
+            return lamp_object
 
         except DALIError as err:
             logger.error("While initializing <%s> @ %s: %s", name, address, err)
+            return None
 
+    lamps_by_address = {}
     for lamp in lamps:
         short_address = address.Short(lamp)
 
-        create_mqtt_lamp(
+        lamps_by_address[lamp] = create_mqtt_lamp(
             short_address,
             devices_names_config.get_friendly_name(short_address.address),
         )
@@ -206,7 +210,10 @@ def initialize_lamps(data_object, client):
 
         group_address = address.Group(int(group))
 
-        create_mqtt_lamp(group_address, f"group_{group}")
+        members = [lamps_by_address.get(lamp) for lamp in groups[group]]
+        create_mqtt_lamp(
+            group_address, f"group_{group}", [m for m in members if m is not None]
+        )
 
     if devices_names_config.is_devices_file_empty():
         devices_names_config.save_devices_names_file(data_object["all_lamps"])
@@ -246,6 +253,20 @@ def on_message_cmd(mqtt_client, data_object, msg):
             logger.error("Failed to set light <%s> to OFF: %s", light, err)
         except KeyError:
             logger.error("Lamp %s doesn't exists", light)
+    elif msg.payload == MQTT_PAYLOAD_ON:
+        try:
+            lamp_object = get_lamp_object(data_object, light)
+            logger.debug("Set light <%s> to %s", light, msg.payload)
+            lamp_object.level = lamp_object.max_level
+            mqtt_client.publish(
+                MQTT_STATE_TOPIC.format(data_object["base_topic"], light),
+                MQTT_PAYLOAD_ON,
+                retain=True,
+            )
+        except DALIError as err:
+            logger.error("Failed to set light <%s> to ON: %s", light, err)
+        except KeyError:
+            logger.error("Lamp %s doesn't exists", light)
 
 
 def on_message_reinitialize_lamps_cmd(mqtt_client, data_object, msg):
@@ -279,7 +300,9 @@ def on_message_brightness_cmd(mqtt_client, data_object, msg):
         lamp_object = get_lamp_object(data_object, light)
 
         try:
-            lamp_object.level = int(msg.payload.decode("utf-8"))
+            lamp_object.level = lamp_object.ha_to_level(
+                int(msg.payload.decode("utf-8"))
+            )
             if lamp_object.level == 0:
                 # 0 in DALI is turn off with fade out
                 lamp_object.off()
@@ -292,7 +315,7 @@ def on_message_brightness_cmd(mqtt_client, data_object, msg):
             )
             mqtt_client.publish(
                 MQTT_BRIGHTNESS_STATE_TOPIC.format(data_object["base_topic"], light),
-                lamp_object.level,
+                lamp_object.level_to_ha(lamp_object.level),
                 retain=True,
             )
         except ValueError as err:
@@ -323,7 +346,7 @@ def on_message_brightness_get_cmd(mqtt_client, data_object, msg):
 
             mqtt_client.publish(
                 MQTT_BRIGHTNESS_STATE_TOPIC.format(data_object["base_topic"], light),
-                lamp_object.level,
+                lamp_object.level_to_ha(lamp_object.level),
                 retain=False,
             )
 

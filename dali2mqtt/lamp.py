@@ -14,6 +14,7 @@ from dali2mqtt.consts import (
     MQTT_DALI2MQTT_STATUS,
     MQTT_NOT_AVAILABLE,
     MQTT_PAYLOAD_OFF,
+    MQTT_PAYLOAD_ON,
     MQTT_STATE_TOPIC,
     __version__,
 )
@@ -32,8 +33,12 @@ class Lamp:
         driver,
         friendly_name,
         short_address,
+        members=None,
     ):
-        """Initialize Lamp."""
+        """Initialize Lamp.
+
+        For a group, ``members`` are the Lamp objects of its member lamps.
+        """
         self.driver = driver
         self.short_address = short_address
         self.friendly_name = friendly_name
@@ -43,11 +48,10 @@ class Lamp:
 
         logger.setLevel(ALL_SUPPORTED_LOG_LEVELS[log_level])
 
-        # Groups don't support query operations, use defaults
+        # Groups can't be queried: every member would answer at once.
         if self.is_group:
             self.min_physical_level = None
-            self.min_level = 1  # Standard DALI minimum
-            self.max_level = 254  # Standard DALI maximum
+            self.min_level, self.max_level = self._group_range(members)
             # Set level directly without calling setter (which would send DAPC command)
             self.__level = 0  # Default to off, can't query actual level for groups
             logger.debug("Initialized group lamp %s with default values", friendly_name)
@@ -67,6 +71,42 @@ class Lamp:
             self.max_level = driver.send(gear.QueryMaxLevel(short_address)).value
             self.level = driver.send(gear.QueryActualLevel(short_address)).value
 
+    @staticmethod
+    def _group_range(members):
+        """Return the (min, max) level range in which any group member responds.
+
+        Members with a higher minimum stay at their own minimum below it.
+        """
+        levels = [
+            (m.min_level, m.max_level)
+            for m in members or []
+            if isinstance(m.min_level, int) and isinstance(m.max_level, int)
+        ]
+        if not levels:
+            return 1, 254  # Full DALI range
+        return min(lo for lo, _ in levels), max(hi for _, hi in levels)
+
+    @property
+    def dimmable(self):
+        """Return True if the lamp has more than one light level."""
+        return self.max_level > self.min_level
+
+    def level_to_ha(self, level):
+        """Convert a DALI level to Home Assistant brightness (0 = off).
+
+        Home Assistant brightness 1..bri_scl maps onto min_level..max_level.
+        """
+        if not isinstance(level, int) or level <= 0:
+            return 0
+        level = min(max(level, self.min_level), self.max_level)
+        return level - self.min_level + 1
+
+    def ha_to_level(self, brightness):
+        """Convert Home Assistant brightness to a DALI level (0 = off)."""
+        if brightness <= 0:
+            return 0
+        return min(self.min_level + brightness - 1, self.max_level)
+
     def gen_ha_config(self, mqtt_base_topic):
         """Generate a automatic configuration for Home Assistant."""
         json_config = {
@@ -75,15 +115,8 @@ class Lamp:
             "uniq_id": f"{type(self.driver).__name__}_{self.short_address}",
             "stat_t": MQTT_STATE_TOPIC.format(mqtt_base_topic, self.device_name),
             "cmd_t": MQTT_COMMAND_TOPIC.format(mqtt_base_topic, self.device_name),
+            "pl_on": MQTT_PAYLOAD_ON.decode("utf-8"),
             "pl_off": MQTT_PAYLOAD_OFF.decode("utf-8"),
-            "bri_stat_t": MQTT_BRIGHTNESS_STATE_TOPIC.format(
-                mqtt_base_topic, self.device_name
-            ),
-            "bri_cmd_t": MQTT_BRIGHTNESS_COMMAND_TOPIC.format(
-                mqtt_base_topic, self.device_name
-            ),
-            "bri_scl": self.max_level,
-            "on_cmd_type": "brightness",
             "avty_t": MQTT_DALI2MQTT_STATUS.format(mqtt_base_topic),
             "pl_avail": MQTT_AVAILABLE,
             "pl_not_avail": MQTT_NOT_AVAILABLE,
@@ -95,6 +128,19 @@ class Lamp:
                 "mf": "dali2mqtt",
             },
         }
+        if self.dimmable:
+            json_config.update(
+                {
+                    "bri_stat_t": MQTT_BRIGHTNESS_STATE_TOPIC.format(
+                        mqtt_base_topic, self.device_name
+                    ),
+                    "bri_cmd_t": MQTT_BRIGHTNESS_COMMAND_TOPIC.format(
+                        mqtt_base_topic, self.device_name
+                    ),
+                    "bri_scl": self.level_to_ha(self.max_level),
+                    "on_cmd_type": "brightness",
+                }
+            )
         return json.dumps(json_config)
 
     def actual_level(self):

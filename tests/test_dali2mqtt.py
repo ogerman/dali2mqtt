@@ -4,7 +4,7 @@ from unittest import mock
 
 from dali.address import Group, Short
 
-from dali2mqtt.dali2mqtt import on_message_brightness_cmd
+from dali2mqtt.dali2mqtt import on_message_brightness_cmd, on_message_cmd
 from dali2mqtt.lamp import Lamp
 
 
@@ -43,4 +43,35 @@ def test_brightness_command_reaches_lamp():
 
     (cmd,), _ = data["driver"].send.call_args
     assert cmd.destination == Short(0)
-    assert data["all_lamps"]["kitchen"].level == 150
+    # HA brightness 1..170 maps onto kitchen's levels 85..254
+    assert data["all_lamps"]["kitchen"].level == 234
+
+
+def test_lowest_brightness_sets_lamp_minimum():
+    """The bottom of the HA slider is the lamp's own minimum, not rejected."""
+    data = make_data_object()
+    client = mock.Mock()
+    msg = mock.Mock(topic="dali2mqtt/kitchen/light/brightness/set", payload=b"1")
+
+    on_message_brightness_cmd(client, data, msg)
+
+    assert data["all_lamps"]["kitchen"].level == 85
+    client.publish.assert_any_call(
+        "dali2mqtt/kitchen/light/brightness/status", 1, retain=True
+    )
+
+
+def test_on_command_sets_max_level():
+    """On/off-only devices get ON on the switch topic."""
+    data = make_data_object()
+    client = mock.Mock()
+    msg = mock.Mock(topic="dali2mqtt/kitchen/light/switch", payload=b"ON")
+
+    on_message_cmd(client, data, msg)
+
+    (cmd,), _ = data["driver"].send.call_args
+    assert type(cmd).__name__ == "DAPC"
+    assert data["all_lamps"]["kitchen"].level == 254
+    client.publish.assert_called_once_with(
+        "dali2mqtt/kitchen/light/status", b"ON", retain=True
+    )

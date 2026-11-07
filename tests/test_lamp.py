@@ -69,10 +69,11 @@ def test_ha_config(fake_driver, fake_address):
         "uniq_id": f"Mock_{addr}",
         "stat_t": "test/my-lamp/light/status",
         "cmd_t": "test/my-lamp/light/switch",
+        "pl_on": "ON",
         "pl_off": "OFF",
         "bri_stat_t": "test/my-lamp/light/brightness/status",
         "bri_cmd_t": "test/my-lamp/light/brightness/set",
-        "bri_scl": MAX_BRIGHTNESS,
+        "bri_scl": MAX_BRIGHTNESS - MIN_BRIGHTNESS + 1,
         "on_cmd_type": "brightness",
         "avty_t": "test/status",
         "pl_avail": "online",
@@ -166,3 +167,57 @@ def test_actual_level_stores_number():
     lamp.actual_level()
 
     assert lamp.level == 120
+
+
+def make_lamp(min_level, max_level, addr=Short(1), level=0):
+    driver = mock.Mock()
+    driver.send = mock.Mock(
+        side_effect=[
+            mock.Mock(value=v) for v in (min_level, min_level, max_level, level)
+        ]
+        + [None] * 10
+    )
+    return Lamp("debug", driver, "lamp", addr)
+
+
+@pytest.mark.parametrize(
+    "brightness,level",
+    [(0, 0), (1, 157), (50, 206), (98, 254), (255, 254)],
+)
+def test_ha_brightness_maps_onto_min_max(brightness, level):
+    """HA brightness 1..bri_scl covers the lamp's own min..max levels."""
+    lamp = make_lamp(157, 254)
+    assert json.loads(lamp.gen_ha_config("t"))["bri_scl"] == 98
+    assert lamp.ha_to_level(brightness) == level
+    if 0 < brightness <= 98:
+        assert lamp.level_to_ha(level) == brightness
+
+
+def test_level_below_min_reported_as_lowest_brightness():
+    lamp = make_lamp(157, 254)
+    assert lamp.level_to_ha(100) == 1
+    assert lamp.level_to_ha(0) == 0
+
+
+def test_fixed_level_device_is_on_off_only():
+    """A device with min == max (a fan relay) gets no brightness slider."""
+    lamp = make_lamp(254, 254)
+    config = json.loads(lamp.gen_ha_config("t"))
+    assert not lamp.dimmable
+    assert "bri_cmd_t" not in config
+    assert "bri_scl" not in config
+    assert "on_cmd_type" not in config
+    assert config["pl_on"] == "ON"
+
+
+def test_group_uses_members_range():
+    members = [make_lamp(157, 254), make_lamp(85, 254), make_lamp(254, 254)]
+    group = Lamp("debug", mock.Mock(), "group", Group(1), members)
+    assert (group.min_level, group.max_level) == (85, 254)
+    assert json.loads(group.gen_ha_config("t"))["bri_scl"] == 170
+
+
+def test_group_of_fixed_level_devices_is_on_off_only():
+    members = [make_lamp(254, 254), make_lamp(254, 254)]
+    group = Lamp("debug", mock.Mock(), "group", Group(1), members)
+    assert not group.dimmable
