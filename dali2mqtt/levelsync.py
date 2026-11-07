@@ -205,36 +205,46 @@ class LevelSync:
     # Worker
 
     def _due(self):
-        """Return (lamps needing their fade time, lamps to query) and wait otherwise."""
+        """Return (lamps needing their fade time, lamps to query, full poll?).
+
+        Waits for the next deadline when there is nothing to do.
+        """
         now = time.monotonic()
         unknown_fade = [lamp for lamp in self._lamps.values() if lamp.fade_time is None]
         if self.poll_interval and self._next_poll is not None and now >= self._next_poll:
             self._next_poll = now + self.poll_interval
             self._dirty.clear()
-            return unknown_fade, list(self._lamps.values())
+            return unknown_fade, list(self._lamps.values()), True
         due = [addr for addr, when in self._dirty.items() if when <= now]
         for addr in due:
             del self._dirty[addr]
         lamps = [self._lamps[addr] for addr in due if addr in self._lamps]
         if lamps or unknown_fade:
-            return unknown_fade, lamps
+            return unknown_fade, lamps, False
         deadlines = list(self._dirty.values())
         if self.poll_interval and self._next_poll is not None:
             deadlines.append(self._next_poll)
         timeout = max(0.0, min(deadlines) - now) if deadlines else None
         self._wakeup.wait(timeout)
-        return [], []
+        return [], [], False
 
     def _run(self):
         while True:
             with self._lock:
                 if self._stopping:
                     return
-                unknown_fade, lamps = self._due()
+                unknown_fade, lamps, full_poll = self._due()
             for lamp in unknown_fade:
                 self._load_fade_time(lamp)
+            started = time.monotonic()
             for lamp in lamps:
                 with self._lock:
                     if self._stopping:
                         return
                 self.refresh(lamp)
+            if full_poll:
+                logger.debug(
+                    "Polled %d lamps in %.1fs", len(lamps), time.monotonic() - started
+                )
+            elif lamps:
+                logger.debug("Re-checked %s", [lamp.friendly_name for lamp in lamps])

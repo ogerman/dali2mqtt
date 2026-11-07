@@ -8,6 +8,12 @@ number) and passes every sniffed bus frame to ``on_frame(bits, data)``.
 The firmware only reports frames from other masters in sniffing mode
 (``enableSniffing``); it keeps transmitting our own commands as usual.
 
+Firmware 2.3 garbles answers in sniffing mode: every answer with the lowest
+bit set comes back as "invalid answer". So sniffing is paused for queries
+and resumed once no query has been sent for ``SNIFF_RESUME_DELAY``. A burst
+of queries (a bus scan, a poll sweep) pays for the switch only once. The mode
+also survives a restart of dali2mqtt, so ``start`` always sets it explicitly.
+
 Report layout, from the firmware README and the hasseb GUI::
 
     byte 1   0x07, DALI frame report
@@ -36,6 +42,7 @@ logger = logging.getLogger(__name__)
 REPORT_LENGTH = 10
 READ_TIMEOUT_MS = 100
 RESPONSE_TIMEOUT = 2.0
+SNIFF_RESUME_DELAY = 0.2
 
 
 class SniffingHassebDriver(SyncHassebDALIUSBDriver):
@@ -51,13 +58,19 @@ class SniffingHassebDriver(SyncHassebDALIUSBDriver):
         self._response_ready = threading.Event()
         self._stop = threading.Event()
         self._reader = None
+        # Held for a whole command, so sniffing never resumes mid-query.
+        self._io_lock = threading.Lock()
+        self._sniff_wanted = False
+        self._sniff_active = False
+        self._last_query = 0.0
 
     # Lifecycle
 
     def start(self, sniff=True):
         """Start the reader thread, optionally putting the device in sniff mode."""
+        self._sniff_wanted = sniff
+        self._set_sniffing(sniff)
         if sniff:
-            self.enableSniffing()
             logger.info("hasseb bus sniffing enabled")
         self._stop.clear()
         self._reader = threading.Thread(
@@ -71,10 +84,20 @@ class SniffingHassebDriver(SyncHassebDALIUSBDriver):
         if self._reader is not None:
             self._reader.join(timeout=2)
             self._reader = None
+        self._sniff_wanted = False
         try:
-            self.disableSniffing()
+            self._set_sniffing(False)
         except Exception:  # pylint: disable=broad-except
             pass
+
+    def _set_sniffing(self, on):
+        if on:
+            self.enableSniffing()
+        else:
+            self.disableSniffing()
+        if self._sniff_active != on:
+            logger.debug("hasseb sniffing %s", "resumed" if on else "paused for queries")
+        self._sniff_active = on
 
     @property
     def reading(self):
@@ -84,8 +107,34 @@ class SniffingHassebDriver(SyncHassebDALIUSBDriver):
     # Sending
 
     def send(self, command):
-        self._response_ready.clear()
-        return super().send(command)
+        with self._io_lock:
+            if getattr(command, "is_query", False):
+                if self._sniff_active:
+                    self._set_sniffing(False)
+                self._last_query = time.monotonic()
+            self._response_ready.clear()
+            try:
+                return super().send(command)
+            finally:
+                if getattr(command, "is_query", False):
+                    self._last_query = time.monotonic()
+
+    def _maybe_resume_sniffing(self):
+        """Turn sniffing back on once the queries have stopped."""
+        if not self._sniff_wanted or self._sniff_active:
+            return
+        if time.monotonic() - self._last_query < SNIFF_RESUME_DELAY:
+            return
+        # Never block: a command in progress waits for this thread to read.
+        if not self._io_lock.acquire(blocking=False):
+            return
+        try:
+            if self._sniff_wanted and not self._sniff_active:
+                self._set_sniffing(True)
+        except Exception as err:  # pylint: disable=broad-except
+            logger.error("Can't resume hasseb sniffing: %s", err)
+        finally:
+            self._io_lock.release()
 
     def wait_for_response(self):
         """Wait for the reader thread to deliver the answer to ``_pending``."""
@@ -106,6 +155,7 @@ class SniffingHassebDriver(SyncHassebDALIUSBDriver):
 
     def _read_loop(self):
         while not self._stop.is_set():
+            self._maybe_resume_sniffing()
             try:
                 data = self._read()
             except Exception as err:  # pylint: disable=broad-except

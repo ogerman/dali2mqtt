@@ -128,6 +128,17 @@ def scan_groups(dali_driver, lamps):
     return groups
 
 
+def read_hasseb_firmware(driver, attempts=3):
+    """Return the hasseb firmware version, or None when it can't be read."""
+    for attempt in range(attempts):
+        try:
+            return float(driver.readFirmwareVersion())
+        except ValueError:
+            logger.warning("Can't read hasseb firmware version, attempt %d", attempt + 1)
+            time.sleep(0.5)
+    return None
+
+
 def initialize_lamps(data_object, client):
     """Initialize all lamps and groups."""
 
@@ -162,7 +173,9 @@ def initialize_lamps(data_object, client):
                     True,
                 ),
                 (
-                    MQTT_BRIGHTNESS_STATE_TOPIC.format(mqtt_base_topic, name),
+                    MQTT_BRIGHTNESS_STATE_TOPIC.format(
+                        mqtt_base_topic, lamp_object.device_name
+                    ),
                     lamp_object.level_to_ha(lamp_object.level),
                     False,
                 ),
@@ -184,7 +197,7 @@ def initialize_lamps(data_object, client):
                     True,
                 ),
                 (
-                    MQTT_STATE_TOPIC.format(mqtt_base_topic, name),
+                    MQTT_STATE_TOPIC.format(mqtt_base_topic, lamp_object.device_name),
                     MQTT_PAYLOAD_ON if lamp_object.level > 0 else MQTT_PAYLOAD_OFF,
                     False,
                 ),
@@ -261,7 +274,7 @@ def on_message_cmd(mqtt_client, data_object, msg):
     ).group(1)
     if msg.payload == MQTT_PAYLOAD_OFF:
         try:
-            lamp_object = data_object["all_lamps"][light]
+            lamp_object = get_lamp_object(data_object, light)
             logger.debug("Set light <%s> to %s", light, msg.payload)
             lamp_object.off()
             mqtt_client.publish(
@@ -296,17 +309,18 @@ def on_message_reinitialize_lamps_cmd(mqtt_client, data_object, msg):
 
 
 def get_lamp_object(data_object, light):
-    """Retrieve lamp object from data object."""
-    if "group_" in light:
-        """Check if the comand is for a dali group"""
-        group = int(re.search(r"group_(\d+)", light).group(1))
-        lamp_object = data_object["all_lamps"][f"group_{group}"]
-    else:
-        """The command is for a single lamp"""
-        if light not in data_object["all_lamps"]:
-            raise KeyError
-        lamp_object = data_object["all_lamps"][light]
-    return lamp_object
+    """Retrieve a lamp by friendly name or by its MQTT topic name.
+
+    Home Assistant uses the slugified name from the discovery config, so a
+    group stored as ``group_1`` is addressed as ``group-1``.
+    """
+    all_lamps = data_object["all_lamps"]
+    if light in all_lamps:
+        return all_lamps[light]
+    for lamp_object in all_lamps.values():
+        if lamp_object.device_name == light:
+            return lamp_object
+    raise KeyError(light)
 
 
 def on_message_brightness_cmd(mqtt_client, data_object, msg):
@@ -512,8 +526,8 @@ def main(args):
 
         dali_driver = SniffingHassebDriver()
 
-        firmware_version = float(dali_driver.readFirmwareVersion())
-        if firmware_version < MIN_HASSEB_FIRMWARE_VERSION:
+        firmware_version = read_hasseb_firmware(dali_driver)
+        if firmware_version is None or firmware_version < MIN_HASSEB_FIRMWARE_VERSION:
             logger.error("Using dali2mqtt requires newest hasseb firmware")
             logger.error(
                 "Please, look at https://github.com/hasseb/python-dali/tree/master/dali/driver/hasseb_firmware"

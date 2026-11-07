@@ -100,6 +100,55 @@ def test_send_without_answer_times_out():
     assert driver._pending is None
 
 
+def written_modes(device):
+    return [bytes(c.args[0])[3] for c in device.write.call_args_list if bytes(c.args[0])[1] == 0x05]
+
+
+def test_start_without_sniffing_turns_a_leftover_sniff_mode_off():
+    driver, device = make_driver()
+    device.read.return_value = []
+
+    driver.start(sniff=False)
+    driver.stop()
+
+    assert written_modes(device) == [0, 0]
+
+
+def test_queries_pause_sniffing_until_the_bus_is_idle():
+    """Firmware 2.3 garbles odd answers in sniff mode."""
+    driver, device = make_driver()
+    driver._sniff_wanted = driver._sniff_active = True
+    driver._reader = mock.Mock(is_alive=mock.Mock(return_value=True))
+
+    def answer(data):
+        data = bytes(data)
+        if data[1] == 0x07 and data[4]:
+            threading.Timer(
+                0.01, driver._handle_report, [report(2, seq=data[2], data=b"\x9d", length=1)]
+            ).start()
+
+    device.write.side_effect = answer
+    assert driver.send(gear.QueryMinLevel(Short(0))).value == 157
+    assert driver.send(gear.QueryMaxLevel(Short(0))).value == 157
+    assert written_modes(device) == [0]  # paused once for the burst
+
+    driver._maybe_resume_sniffing()
+    assert written_modes(device) == [0]  # too soon
+    driver._last_query -= 1
+    driver._maybe_resume_sniffing()
+    assert written_modes(device) == [0, 1]
+    assert driver._sniff_active
+
+
+def test_commands_do_not_pause_sniffing():
+    driver, device = make_driver()
+    driver._sniff_wanted = driver._sniff_active = True
+
+    driver.send(gear.DAPC(Short(0), 100))
+
+    assert written_modes(device) == []
+
+
 def test_start_enables_sniffing_and_stop_disables_it():
     driver, device = make_driver()
     device.read.return_value = []

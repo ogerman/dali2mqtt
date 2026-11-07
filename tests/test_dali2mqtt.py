@@ -75,3 +75,33 @@ def test_on_command_sets_max_level():
     client.publish.assert_called_once_with(
         "dali2mqtt/kitchen/light/status", b"ON", retain=True
     )
+
+
+def test_firmware_read_is_retried():
+    from dali2mqtt.dali2mqtt import read_hasseb_firmware
+
+    driver = mock.Mock()
+    driver.readFirmwareVersion = mock.Mock(side_effect=["VERSION_ERROR", "2.3"])
+    with mock.patch("time.sleep"):
+        assert read_hasseb_firmware(driver) == 2.3
+
+    driver.readFirmwareVersion = mock.Mock(return_value="VERSION_ERROR")
+    with mock.patch("time.sleep"):
+        assert read_hasseb_firmware(driver) is None
+
+
+def test_commands_on_home_assistant_topic_names():
+    """HA addresses group_1 as group-1, the slug from the discovery config."""
+    data = make_data_object()
+    client = mock.Mock()
+
+    msg = mock.Mock(topic="dali2mqtt/group-1/light/brightness/set", payload=b"200")
+    on_message_brightness_cmd(client, data, msg)
+    (cmd,), _ = data["driver"].send.call_args
+    assert cmd.destination == Group(1)
+
+    msg = mock.Mock(topic="dali2mqtt/group-1/light/switch", payload=b"OFF")
+    on_message_cmd(client, data, msg)
+    (cmd,), _ = data["driver"].send.call_args
+    assert type(cmd).__name__ == "Off"
+    client.publish.assert_called_with("dali2mqtt/group-1/light/status", b"OFF", retain=True)

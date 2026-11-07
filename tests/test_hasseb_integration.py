@@ -93,6 +93,9 @@ class FakeHasseb:
             with self.lock:
                 if answer is None:
                     self.queue.append(report(1, seq=seq))
+                elif self.sniffing and answer & 1:
+                    # Firmware 2.3 reports odd answers as invalid in sniff mode.
+                    self.queue.append(report(3, seq=seq, data=b"\x00", length=1))
                 else:
                     self.queue.append(report(2, seq=seq, data=bytes([answer]), length=1))
 
@@ -159,6 +162,7 @@ def test_end_to_end_with_emulated_hasseb():
             "SyncHassebDALIUSBDriver_"
         )
         assert lamps["lamp1"].level == 120
+        assert lamps["lamp0"].min_level == 85  # odd answer, garbled in sniff mode
         assert lamps["group_1"].level == 120  # derived from members at startup
 
         # A wall switch sets lamp0 to 200: sniffed, applied, confirmed.
