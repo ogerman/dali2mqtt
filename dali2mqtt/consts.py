@@ -20,6 +20,8 @@ CONF_MQTT_PASSWORD = "mqtt_password"
 CONF_MQTT_BASE_TOPIC = "mqtt_base_topic"
 CONF_DALI_DRIVER = "dali_driver"
 CONF_DALI_LAMPS = "dali_lamps"
+CONF_DALI_POLL_INTERVAL = "dali_poll_interval"
+CONF_DALI_SNIFF = "dali_sniff"
 CONF_HA_DISCOVERY_PREFIX = "ha_discovery_prefix"
 CONF_LOG_LEVEL = "log_level"
 CONF_LOG_COLOR = "log_color"
@@ -31,6 +33,8 @@ DEFAULT_MQTT_PORT = "1883"
 DEFAULT_MQTT_BASE_TOPIC = "dali2mqtt"
 DEFAULT_HA_DISCOVERY_PREFIX = "homeassistant"
 DEFAULT_DALI_DRIVER = "hasseb"
+DEFAULT_DALI_POLL_INTERVAL = 10  # seconds between level polls, 0 disables
+DEFAULT_DALI_SNIFF = True  # listen to other masters where the driver allows
 DEFAULT_LOG_LEVEL = "info"
 DEFAULT_LOG_COLOR = False
 

@@ -52,6 +52,9 @@ Then just edit the file accordingly. You can also create the file with the right
                         DALI device driver
   --dali-lamps DALI_LAMPS
                         Number of lamps to scan
+  --dali-poll-interval DALI_POLL_INTERVAL
+                        Seconds between polls of the lamps' levels, 0 disables
+  --no-dali-sniff       Don't listen to other masters on the bus
   --ha-discover-prefix HA_DISCOVER_PREFIX
                         HA discover mqtt prefix
   --log-level {critical,error,warning,info,debug}  
@@ -99,3 +102,25 @@ sudo systemctl status dali2mqtt.service
 
 When the daemon first runs, it creates a default `config.yaml` file.
 You can edit the file to customize your setup.
+
+### Keeping light levels in sync
+
+Lamps are also controlled by other things on the bus: wall switches, sensors,
+other controllers. dali2mqtt keeps the state it reports to Home Assistant in
+sync with the real levels in two ways, both feeding one model:
+
+* **Bus sniffing** (hasseb only, `dali_sniff: true` by default). The hasseb
+  USB master is put in sniffing mode and every command another master sends
+  is decoded. Direct level commands update the state immediately; for anything
+  whose outcome depends on the lamp (scenes, up/down steps, fades) the lamp is
+  queried once its fade time is over.
+* **Polling** (every driver, `dali_poll_interval`, default 10 seconds, 0
+  disables). Every lamp's actual level is queried in turn, catching whatever
+  the bus never showed: missed frames, power cycles, time spent offline. With
+  sniffing on, a longer interval such as 60 seconds is enough.
+
+Groups are never queried. A group is on when any member is on, and its
+brightness is the mean of the members that are on.
+
+Only one command is on the bus at a time, so commands from Home Assistant wait
+at most for a single query to finish.

@@ -12,14 +12,18 @@ import dali.gear.general as gear
 from dali.command import YesNoResponse
 from dali.exceptions import DALIError
 
+from dali2mqtt.bus import Bus
 from dali2mqtt.devicesnamesconfig import DevicesNamesConfig
 from dali2mqtt.lamp import Lamp
+from dali2mqtt.levelsync import LevelSync
 from dali2mqtt.config import Config
 from dali2mqtt.consts import (
     ALL_SUPPORTED_LOG_LEVELS,
     CONF_CONFIG,
     CONF_DALI_DRIVER,
     CONF_DALI_LAMPS,
+    CONF_DALI_POLL_INTERVAL,
+    CONF_DALI_SNIFF,
     CONF_DEVICES_NAMES_FILE,
     CONF_HA_DISCOVERY_PREFIX,
     CONF_LOG_COLOR,
@@ -217,7 +221,23 @@ def initialize_lamps(data_object, client):
 
     if devices_names_config.is_devices_file_empty():
         devices_names_config.save_devices_names_file(data_object["all_lamps"])
+    if data_object.get("sync") is not None:
+        data_object["sync"].set_lamps(data_object["all_lamps"])
     logger.info("initialize_lamps finished")
+
+
+def publish_lamp_state(mqtt_client, mqtt_base_topic, lamp):
+    """Publish a lamp's current on/off state and brightness."""
+    mqtt_client.publish(
+        MQTT_STATE_TOPIC.format(mqtt_base_topic, lamp.device_name),
+        MQTT_PAYLOAD_ON if lamp.level > 0 else MQTT_PAYLOAD_OFF,
+        retain=True,
+    )
+    mqtt_client.publish(
+        MQTT_BRIGHTNESS_STATE_TOPIC.format(mqtt_base_topic, lamp.device_name),
+        lamp.level_to_ha(lamp.level),
+        retain=True,
+    )
 
 
 def on_detect_changes_in_config(mqtt_client):
@@ -341,7 +361,11 @@ def on_message_brightness_get_cmd(mqtt_client, data_object, msg):
         lamp_object = get_lamp_object(data_object, light)
 
         try:
-            lamp_object.actual_level()
+            sync = data_object.get("sync")
+            if sync is not None:
+                sync.refresh(lamp_object)  # also updates the groups it belongs to
+            else:
+                lamp_object.actual_level()
             logger.debug("Get light <%s> results in %d", light, lamp_object.level)
 
             mqtt_client.publish(
@@ -407,6 +431,7 @@ def create_mqtt_client(
     devices_names_config,
     ha_prefix,
     log_level,
+    sync=None,
 ):
     """Create MQTT client object, setup callbacks and connection to server."""
     logger.debug("Connecting to %s:%s", mqtt_server, mqtt_port)
@@ -419,8 +444,11 @@ def create_mqtt_client(
             "devices_names_config": devices_names_config,
             "log_level": log_level,
             "all_lamps": {},
+            "sync": sync,
         },
     )
+    if sync is not None:
+        sync.publish = lambda lamp: publish_lamp_state(mqttc, mqtt_base_topic, lamp)
     mqttc.will_set(
         MQTT_DALI2MQTT_STATUS.format(mqtt_base_topic), MQTT_NOT_AVAILABLE, retain=True
     )
@@ -478,9 +506,9 @@ def main(args):
     logger.debug("Using <%s> driver", config.dali_driver)
 
     if config.dali_driver == HASSEB:
-        from dali.driver.hasseb import SyncHassebDALIUSBDriver
+        from dali2mqtt.hasseb_sniffer import SniffingHassebDriver
 
-        dali_driver = SyncHassebDALIUSBDriver()
+        dali_driver = SniffingHassebDriver()
 
         firmware_version = float(dali_driver.readFirmwareVersion())
         if firmware_version < MIN_HASSEB_FIRMWARE_VERSION:
@@ -498,15 +526,29 @@ def main(args):
 
         dali_driver = DaliServer("localhost", 55825)
 
+    bus = Bus(dali_driver)
+    sync = LevelSync(bus, poll_interval=config.dali_poll_interval)
+    if hasattr(dali_driver, "start"):
+        # The hasseb reader thread feeds sniffed frames into the bus.
+        dali_driver.on_frame = bus.on_sniffed_frame
+        dali_driver.start(sniff=config.dali_sniff)
+    sync.start()
+    logger.info(
+        "Level sync: poll every %ss, sniffing %s",
+        config.dali_poll_interval or "never",
+        "on" if config.dali_sniff and hasattr(dali_driver, "start") else "off",
+    )
+
     retries = 0
     while retries < MAX_RETRIES:
         try:
             mqttc = create_mqtt_client(
-                dali_driver,
+                bus,
                 *config.mqtt_conf,
                 devices_names_config,
                 config.ha_discovery_prefix,
                 config.log_level,
+                sync,
             )
             mqttc.loop_forever()
             retries = (
@@ -518,6 +560,9 @@ def main(args):
             retries += 1
 
     logger.error("Maximum retries of %d reached, exiting...", retries)
+    sync.stop()
+    if hasattr(dali_driver, "stop"):
+        dali_driver.stop()
 
 
 if __name__ == "__main__":
@@ -550,6 +595,17 @@ if __name__ == "__main__":
         f"--{CONF_DALI_LAMPS.replace('_', '-')}",
         help="Number of lamps to scan",
         type=int,
+    )
+    parser.add_argument(
+        f"--{CONF_DALI_POLL_INTERVAL.replace('_', '-')}",
+        help="Seconds between polls of the lamps' levels, 0 disables",
+        type=int,
+    )
+    parser.add_argument(
+        "--no-dali-sniff",
+        dest=CONF_DALI_SNIFF,
+        help="Don't listen to other masters on the bus",
+        action="store_false",
     )
     parser.add_argument(
         f"--{CONF_HA_DISCOVERY_PREFIX.replace('_', '-')}",

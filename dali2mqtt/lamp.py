@@ -40,9 +40,19 @@ class Lamp:
         For a group, ``members`` are the Lamp objects of its member lamps.
         """
         self.driver = driver
+        # Home Assistant unique ids carry the DALI driver's class name; a Bus
+        # wrapper reports the name of the driver it wraps.
+        self.driver_name = (
+            driver.driver_name
+            if isinstance(getattr(driver, "driver_name", None), str)
+            else type(driver).__name__
+        )
         self.short_address = short_address
         self.friendly_name = friendly_name
         self.is_group = isinstance(short_address, address.Group)
+        self.members = list(members or [])
+        # Fade time in seconds, filled in by LevelSync; None while unknown.
+        self.fade_time = None
 
         self.device_name = slugify(friendly_name)
 
@@ -112,7 +122,7 @@ class Lamp:
         json_config = {
             "name": self.friendly_name,
             "def_ent_id": f"dali_light_{self.device_name}",
-            "uniq_id": f"{type(self.driver).__name__}_{self.short_address}",
+            "uniq_id": f"{self.driver_name}_{self.short_address}",
             "stat_t": MQTT_STATE_TOPIC.format(mqtt_base_topic, self.device_name),
             "cmd_t": MQTT_COMMAND_TOPIC.format(mqtt_base_topic, self.device_name),
             "pl_on": MQTT_PAYLOAD_ON.decode("utf-8"),
@@ -124,7 +134,7 @@ class Lamp:
                 "ids": "dali2mqtt",
                 "name": "DALI Lights",
                 "sw": f"dali2mqtt {__version__}",
-                "mdl": f"{type(self.driver).__name__}",
+                "mdl": f"{self.driver_name}",
                 "mf": "dali2mqtt",
             },
         }
@@ -155,6 +165,17 @@ class Lamp:
     def level(self):
         """Return brightness level."""
         return self.__level
+
+    def update_level(self, level):
+        """Record a level observed on the bus without sending anything.
+
+        Returns True when the level changed.
+        """
+        if level == self.__level:
+            return False
+        self.__level = level
+        logger.debug("Lamp <%s> level is now %s", self.friendly_name, level)
+        return True
 
     @level.setter
     def level(self, value):

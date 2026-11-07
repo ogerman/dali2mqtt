@@ -7,6 +7,8 @@ from dali2mqtt.consts import (
     ALL_SUPPORTED_LOG_LEVELS,
     CONF_CONFIG,
     CONF_DALI_DRIVER,
+    CONF_DALI_POLL_INTERVAL,
+    CONF_DALI_SNIFF,
     CONF_DEVICES_NAMES_FILE,
     CONF_HA_DISCOVERY_PREFIX,
     CONF_LOG_COLOR,
@@ -18,6 +20,8 @@ from dali2mqtt.consts import (
     CONF_MQTT_USERNAME,
     DALI_DRIVERS,
     DEFAULT_DALI_DRIVER,
+    DEFAULT_DALI_POLL_INTERVAL,
+    DEFAULT_DALI_SNIFF,
     DEFAULT_DEVICES_NAMES_FILE,
     DEFAULT_HA_DISCOVERY_PREFIX,
     DEFAULT_LOG_COLOR,
@@ -40,6 +44,10 @@ CONF_SCHEMA = vol.Schema(
         vol.Required(CONF_DALI_DRIVER, default=DEFAULT_DALI_DRIVER): vol.In(
             DALI_DRIVERS
         ),
+        vol.Optional(
+            CONF_DALI_POLL_INTERVAL, default=DEFAULT_DALI_POLL_INTERVAL
+        ): vol.All(vol.Coerce(int), vol.Range(min=0, max=3600)),
+        vol.Optional(CONF_DALI_SNIFF, default=DEFAULT_DALI_SNIFF): bool,
         vol.Optional(
             CONF_HA_DISCOVERY_PREFIX, default=DEFAULT_HA_DISCOVERY_PREFIX
         ): str,
@@ -149,6 +157,16 @@ class Config:
     def dali_driver(self):
         """DALI driver configured."""
         return self._config[CONF_DALI_DRIVER]
+
+    @property
+    def dali_poll_interval(self):
+        """Seconds between polls of the lamps' actual levels, 0 disables."""
+        return self._config[CONF_DALI_POLL_INTERVAL]
+
+    @property
+    def dali_sniff(self):
+        """Whether to listen to other masters on the bus."""
+        return self._config[CONF_DALI_SNIFF]
 
     @property
     def ha_discovery_prefix(self):
