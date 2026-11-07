@@ -4,6 +4,7 @@ from dali2mqtt.lamp import Lamp
 from dali2mqtt.consts import __version__
 from unittest import mock
 from dali.address import Short, Group
+from dali.frame import BackwardFrame
 import pytest
 import json
 from slugify import slugify
@@ -153,3 +154,15 @@ def test_ha_unique_id_is_stable(addr, expected):
     driver.send = mock.Mock(return_value=mock.Mock(value=100))
     lamp = Lamp("debug", driver, "lamp", addr)
     assert json.loads(lamp.gen_ha_config("dali2mqtt"))["uniq_id"] == expected
+
+
+def test_actual_level_stores_number():
+    """actual_level() must store the level, not python-dali's response object."""
+    driver = mock.Mock()
+    driver.send = mock.Mock(return_value=mock.Mock(value=100))
+    lamp = Lamp("debug", driver, "lamp", Short(1))
+
+    driver.send = mock.Mock(side_effect=lambda cmd: cmd.response(BackwardFrame(120)))
+    lamp.actual_level()
+
+    assert lamp.level == 120
