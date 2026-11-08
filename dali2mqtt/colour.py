@@ -334,7 +334,10 @@ def rgbw_sequence(address, red, green, blue, white, activate=True):
 
     The control byte goes first: with channels linked (the factory default)
     the gear ignores dim levels, see RGBWAF_NORMALISED_UNLINKED. Amber and
-    freecolour get MASK, "no change".
+    freecolour are set to 0, as the wall colour picker on the real bus does:
+    "no change" kept whatever amber the gear last had, and on the RGBW gear
+    tested amber drives the same LED as white, so the white level had no
+    visible effect.
     """
     yield DTR0(RGBWAF_NORMALISED_UNLINKED)
     yield SetTemporaryRGBWAFControl(address)
@@ -343,8 +346,8 @@ def rgbw_sequence(address, red, green, blue, white, activate=True):
     yield DTR2(blue)
     yield SetTemporaryRGBDimLevel(address)
     yield DTR0(white)
-    yield DTR1(MASK8)
-    yield DTR2(MASK8)
+    yield DTR1(0)
+    yield DTR2(0)
     yield SetTemporaryWAFDimLevel(address)
     if activate:
         yield Activate(address)

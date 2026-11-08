@@ -55,6 +55,9 @@ class FakeGear:
         self.dtr1 = 0
         self.dtr2 = 0
         self.rgbwaf_control = 0x3F  # factory default: every channel linked
+        # Amber and freecolour left over from an earlier controller.
+        self.amber = 254
+        self.free = 254
         self.temporary_tc = None
         self.temporary_rgb = None
         self.temporary_waf = None
@@ -125,7 +128,11 @@ class FakeGear:
             if self.rgbwaf_control & 0x0F:
                 raise AssertionError("RGBW dim levels sent while channels are linked")
             red, green, blue = self.temporary_rgb or (MASK8, MASK8, MASK8)
-            white = (self.temporary_waf or (MASK8,))[0]
+            white, amber, free = self.temporary_waf or (MASK8, MASK8, MASK8)
+            if amber != MASK8:
+                self.amber = amber
+            if free != MASK8:
+                self.free = free
             old = self.rgbw or (0, 0, 0, 0)
             self.rgbw = tuple(
                 o if n == MASK8 else n for o, n in zip(old, (red, green, blue, white))

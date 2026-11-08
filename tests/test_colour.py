@@ -510,3 +510,14 @@ def test_seed_colour_only_fills_an_unknown_state():
     assert lamp.colour_temp == 300
     assert not lamp.seed_colour(mode="rgbwaf", rgbw=(1, 2, 3, 4))
     assert lamp.ha_colour_mode == "color_temp"
+
+
+def test_rgbw_switches_off_leftover_amber_and_freecolour():
+    """Amber drives the white LED on the real RGBW gear; "no change" kept it lit."""
+    lamp, device = make_rgbw_lamp()
+    assert device.amber == 254
+
+    lamp.set_rgbw((255, 0, 0, 128))
+
+    assert (device.amber, device.free) == (0, 0)
+    assert device.rgbw == (254, 0, 0, 127)  # 128 of 255 is dim level 127
