@@ -164,6 +164,17 @@ def test_physical_limits_stand_in_for_unset_rendered_limits():
     assert lamp.has_colour_temp
 
 
+def test_garbage_limits_give_the_default_range():
+    """office-rgb answers MASK for its limits and ~65200 for the physical ones."""
+    lamp, _ = make_lamp(
+        device_types=(8,), tc_range=(153, 370), tc_limits_set=False,
+        tc_physical_range=(65166, 65268), tc=250,
+    )
+
+    assert lamp.colour_temp_range == (153, 370)
+    assert lamp.has_colour_temp
+
+
 # RGBW
 
 

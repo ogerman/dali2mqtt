@@ -43,6 +43,11 @@ RGBWAF = "rgbwaf"
 # Colour temperature Tc is 1..65534 mirek; the gear ignores 0.
 TC_MIN = 1
 TC_MAX = 65534
+# Limits a lamp can plausibly render: 25000 K down to 800 K. Gear has been
+# seen answering near-MASK garbage for limits it never had set.
+TC_SANE = (40, 1250)
+# Used when the gear reports no usable limits; Home Assistant's own default.
+TC_DEFAULT_RANGE = (153, 370)
 # RGBWAF dim levels are arc power levels, 0..254.
 DIM_MAX = 254
 HA_MAX = 255
@@ -186,11 +191,11 @@ def query_colour_values(bus, address, keys, attempts=2):
 
 
 def query_colour_temp_range(bus, address):
-    """Return (coolest, warmest) in mirek, or None when unknown.
+    """Return (coolest, warmest) in mirek, or None when the gear gives none.
 
     These are the limits the gear renders, which may be narrower than its
     physical ones; gear that leaves them at MASK falls back to the physical
-    limits. Coolest is the lower number.
+    limits. Limits outside TC_SANE are ignored. Coolest is the lower number.
     """
     for keys in (
         (Q.ColourTemperatureTcCoolest, Q.ColourTemperatureTcWarmest),
@@ -198,9 +203,13 @@ def query_colour_temp_range(bus, address):
     ):
         values = query_colour_values(bus, address, keys)
         coolest, warmest = (values.get(key) for key in keys)
-        if coolest is not None and warmest is not None and coolest <= warmest:
+        if (
+            isinstance(coolest, int)
+            and isinstance(warmest, int)
+            and TC_SANE[0] <= coolest <= warmest <= TC_SANE[1]
+        ):
             return coolest, warmest
-        logger.debug("No colour temperature range from %s: %s", address, values)
+        logger.debug("No usable colour temperature range from %s: %s", address, values)
     return None
 
 

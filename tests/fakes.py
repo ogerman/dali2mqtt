@@ -25,6 +25,7 @@ class FakeGear:
         device_types=(6,),
         tc_range=None,
         tc_limits_set=True,
+        tc_physical_range=None,
         tc=None,
         rgbw=None,
         xy=False,
@@ -38,6 +39,7 @@ class FakeGear:
         self.device_types = list(device_types)
         self.tc_range = tc_range  # (coolest, warmest) when Tc capable
         self.tc_limits_set = tc_limits_set  # False: rendered limits left at MASK
+        self.tc_physical_range = tc_physical_range or tc_range
         self.tc = tc  # colour temperature; active colour type if given
         self.rgbw = rgbw  # (r, g, b, w) dim levels; active type if no tc
         self.active = "tc" if tc is not None else ("rgbw" if rgbw is not None else None)
@@ -175,9 +177,9 @@ class FakeGear:
         if key == Q.ColourTemperatureTcWarmest and self.tc_range:
             return self.tc_range[1] if self.tc_limits_set else MASK16
         if key == Q.ColourTemperatureTcPhysicalCoolest and self.tc_range:
-            return self.tc_range[0]
+            return self.tc_physical_range[0]
         if key == Q.ColourTemperatureTcPhysicalWarmest and self.tc_range:
-            return self.tc_range[1]
+            return self.tc_physical_range[1]
         channels = (Q.RedDimLevel, Q.GreenDimLevel, Q.BlueDimLevel, Q.WhiteDimLevel)
         if key in channels:
             if self.active != "rgbw" or self.rgbw is None:

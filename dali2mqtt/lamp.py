@@ -115,9 +115,12 @@ class Lamp:
                 self.driver, self.short_address
             )
             if self.colour_temp_range is None:
+                self.colour_temp_range = colour.TC_DEFAULT_RANGE
                 logger.warning(
-                    "%s supports colour temperature but its range can't be read",
+                    "%s supports colour temperature but reports no usable range, "
+                    "assuming %s..%s mirek",
                     self.friendly_name,
+                    *colour.TC_DEFAULT_RANGE,
                 )
         self.update_colour(colour.read_colour_state(self.driver, self.short_address))
 
