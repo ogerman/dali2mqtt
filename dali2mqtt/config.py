@@ -5,7 +5,6 @@ import voluptuous as vol
 import yaml
 from dali2mqtt.consts import (
     ALL_SUPPORTED_LOG_LEVELS,
-    CONF_COLOUR_TEMP_RGB_GAINS,
     CONF_CONFIG,
     CONF_DALI_DRIVER,
     CONF_DALI_POLL_INTERVAL,
@@ -20,7 +19,6 @@ from dali2mqtt.consts import (
     CONF_MQTT_SERVER,
     CONF_MQTT_USERNAME,
     DALI_DRIVERS,
-    DEFAULT_COLOUR_TEMP_RGB_GAINS,
     DEFAULT_DALI_DRIVER,
     DEFAULT_DALI_POLL_INTERVAL,
     DEFAULT_DALI_SNIFF,
@@ -58,12 +56,6 @@ CONF_SCHEMA = vol.Schema(
             ALL_SUPPORTED_LOG_LEVELS
         ),
         vol.Optional(CONF_LOG_COLOR, default=DEFAULT_LOG_COLOR): bool,
-        vol.Optional(
-            CONF_COLOUR_TEMP_RGB_GAINS, default=DEFAULT_COLOUR_TEMP_RGB_GAINS
-        ): vol.All(
-            [vol.All(vol.Coerce(float), vol.Range(min=0.05, max=1.0))],
-            vol.Length(min=3, max=3),
-        ),
     },
     extra=True,
 )
@@ -190,11 +182,6 @@ class Config:
     def log_color(self):
         """Color to be used for logs."""
         return self._config[CONF_LOG_COLOR]
-
-    @property
-    def colour_temp_rgb_gains(self):
-        """Red, green, blue factors for colour temperature mixed on RGBW gear."""
-        return self._config[CONF_COLOUR_TEMP_RGB_GAINS]
 
     @property
     def devices_names_file(self):

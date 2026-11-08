@@ -52,11 +52,6 @@ TC_SANE = (40, 1250)
 TC_DEFAULT_RANGE = (153, 370)
 # Range of the colour temperature mixed from RGBW channels: 6500 K .. 2000 K.
 TC_EMULATED_RANGE = (153, 500)
-# Colour temperatures (mirek) at which rgb_gains and rgb_gains_cool apply.
-GAIN_ANCHORS_MIREK = (370, 154)  # 2700 K, 6500 K
-# Red, green, blue factors applied to the black body colour of a mixed colour
-# temperature, see set_rgb_gains.
-_rgb_gains = (1.0, 1.0, 1.0)
 # RGBWAF dim levels are arc power levels, 0..254.
 DIM_MAX = 254
 HA_MAX = 255
@@ -151,88 +146,81 @@ def kelvin_to_rgb(kelvin):
 class ColourMix:
     """How a colour temperature is mixed from a strip's RGBW channels.
 
-    ``gains`` are the strip's red, green, blue factors at 2700 K and
-    ``gains_cool`` those at 6500 K (see set_rgb_gains); in between they are
-    interpolated by mirek. One set rarely fits both ends: on the nf strips
-    the 2700 K mix matching the room's 2700 K lights is near the textbook
-    one, while the textbook 6500 K looks minty. ``white_kelvin`` is the
-    colour temperature of the white LED (None: assume the warm end of the
-    range) and ``mirek_range`` the (coolest, warmest) range offered.
+    ``points`` are calibration points, ((mirek, (r, g, b, w)), ...) sorted
+    coolest first: the RGBW values (0..255) that render that colour
+    temperature on this strip. In between they are interpolated by mirek.
+    Without points the textbook black body colour is used, with the W
+    channel faded out towards the cool end.
+
+    Camera-based white balance factors didn't work: the strip mixes white
+    from narrow red, green and blue LEDs, and a camera and the eye see such
+    light differently, so camera matches looked strongly coloured. Points
+    matched by eye against a reference light do work. On the nf strips
+    (Arlight RT-B60-10mm RGBW-Warm on MiBoxer DL-X drivers) 2700 K is the
+    white LED alone and 6500 K is 240, 210, 255 with W 200.
+
+    ``mirek_range`` is the (coolest, warmest) range offered.
     """
 
-    gains: tuple = (1.0, 1.0, 1.0)
-    white_kelvin: int = None
+    points: tuple = ()
     mirek_range: tuple = TC_EMULATED_RANGE
-    gains_cool: tuple = None
 
     @classmethod
-    def build(cls, gains=None, white_kelvin=None, kelvin_range=None, gains_cool=None):
-        """Return a mix; unset values come from the global defaults."""
-        gains = _normalised_gains(gains) if gains is not None else _rgb_gains
-        gains_cool = _normalised_gains(gains_cool) if gains_cool is not None else None
-        mirek_range = TC_EMULATED_RANGE
+    def build(cls, white_points=None, kelvin_range=None):
+        """Return a mix from ``{kelvin: [r, g, b, w]}`` and a kelvin range.
+
+        Without a range, calibration points span the range they cover.
+        """
+        points = ()
+        if white_points:
+            points = tuple(sorted(
+                (1_000_000 / kelvin, tuple(int(v) for v in rgbw))
+                for kelvin, rgbw in white_points.items()
+            ))
         if kelvin_range is not None:
             low, high = sorted(kelvin_range)
             mirek_range = (round(1_000_000 / high), round(1_000_000 / low))
-        return cls(gains, white_kelvin, mirek_range, gains_cool)
+        elif len(points) >= 2:
+            mirek_range = (round(points[0][0]), round(points[-1][0]))
+        else:
+            mirek_range = TC_EMULATED_RANGE
+        return cls(points, mirek_range)
 
-    def gains_at(self, mirek):
-        """Return the red, green, blue factors for a colour temperature."""
-        if self.gains_cool is None:
-            return self.gains
-        warm, cool = GAIN_ANCHORS_MIREK
-        t = min(max((mirek - cool) / (warm - cool), 0.0), 1.0)  # 0 at 6500 K, 1 at 2700 K
-        return tuple(c + (w - c) * t for w, c in zip(self.gains, self.gains_cool))
-
-
-def _normalised_gains(gains):
-    gains = tuple(float(g) for g in gains)
-    if len(gains) != 3 or not all(0 < g for g in gains):
-        raise ValueError(f"need three positive factors, got {gains!r}")
-    top = max(gains)
-    return tuple(g / top for g in gains)
+    def kelvin_points(self):
+        """Return the calibration points as {kelvin: [r, g, b, w]}."""
+        return {round(1_000_000 / m): list(rgbw) for m, rgbw in self.points}
 
 
-def set_rgb_gains(gains):
-    """Set the red, green, blue factors for mixed colour temperatures.
-
-    LED strips differ in how strong their red, green and blue LEDs are, so the
-    textbook black body mix rarely looks right. On the nf RGBW strips (Arlight
-    RT-B60-10mm RGBW-Warm on MiBoxer DL-X drivers) equal channels came out
-    minty: matching an RGB mix to the strip's own 2700 K white LED on camera
-    gave factors of about 1.0, 0.96 and 0.62, and the 4000 K mix then also
-    matched the room's 4000 K ceiling lights.
-    """
-    global _rgb_gains  # pylint: disable=global-statement
-    _rgb_gains = _normalised_gains(gains)
+def _interpolate(points, mirek):
+    """RGBW for ``mirek`` from calibration points, clamped at both ends."""
+    if mirek <= points[0][0]:
+        return points[0][1]
+    if mirek >= points[-1][0]:
+        return points[-1][1]
+    for (m1, c1), (m2, c2) in zip(points, points[1:]):
+        if m1 <= mirek <= m2:
+            t = (mirek - m1) / (m2 - m1)
+            return tuple(round(a + (b - a) * t) for a, b in zip(c1, c2))
+    return points[-1][1]
 
 
 def colour_temp_to_rgbw(mirek, mix=None):
     """Return Home Assistant RGBW values (0..255) that render ``mirek``.
 
-    For RGBW gear whose own colour temperature mode doesn't work: on the
-    real bus office-rgb and living-room-rgb render every Tc as the same
-    warm white. The RGB channels make the black body colour, corrected by
-    the strip's factors (``mix.gains_at``). The W channel, a white LED of
-    ``mix.white_kelvin``, is used fully from its own colour temperature down
-    to the warm end and faded out towards the cool end, where it would tint
-    the white. ``mix`` defaults to the global settings.
+    For RGBW gear whose own colour temperature mode doesn't work: a MiBoxer
+    DL-X in RGBW mode, as on the real bus, can only drive its one white
+    channel with it. With calibration points the mix interpolates between
+    them; without, the RGB channels make the textbook black body colour and
+    the W channel fades out from the warm end to the cool end.
     """
     mix = mix or ColourMix.build()
     coolest, warmest = mix.mirek_range
     mirek = min(max(int(mirek), coolest), warmest)
-    rgb = [c * g for c, g in zip(kelvin_to_rgb(1_000_000 / mirek), mix.gains_at(mirek))]
-    top = max(rgb) or 1
-    red, green, blue = (round(c * 255 / top) for c in rgb)
-    white_mirek = warmest
-    if mix.white_kelvin:
-        white_mirek = min(max(1_000_000 / mix.white_kelvin, coolest), warmest)
-    if white_mirek <= coolest:
-        warmth = 1.0
-    else:  # 0 at the cool end, 1 from the white LED's own colour temperature
-        warmth = min(max((mirek - coolest) / (white_mirek - coolest), 0.0), 1.0)
-    white = round(255 * warmth)
-    return red, green, blue, white
+    if len(mix.points) >= 2:
+        return _interpolate(mix.points, mirek)
+    red, green, blue = kelvin_to_rgb(1_000_000 / mirek)
+    warmth = (mirek - coolest) / (warmest - coolest) if warmest > coolest else 1.0
+    return red, green, blue, round(255 * warmth)
 
 
 def ha_to_dim(value):

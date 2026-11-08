@@ -12,14 +12,10 @@ from dali2mqtt.devicesnamesconfig import DevicesNamesConfig
 from dali2mqtt.lamp import Lamp
 from tests.fakes import FakeGear
 
-# Arlight RT-B60-10mm 24V RGBW-Warm on MiBoxer DL-X, calibrated on camera.
+# Arlight RT-B60-10mm 24V RGBW-Warm on MiBoxer DL-X, matched by eye.
 NF_RGB = {
     "friendly_name": "office-rgb",
-    "colour": {
-        "white_kelvin": 2400,
-        "rgb_gains": [0.954, 1.0, 0.877],
-        "rgb_gains_cool": [1.0, 0.85, 0.85],
-    },
+    "colour": {"white_points": {2700: [0, 0, 0, 255], 6500: [240, 210, 255, 200]}},
 }
 
 
@@ -46,27 +42,29 @@ def test_settings_are_read_next_to_the_friendly_name(tmp_path):
 3:
   friendly_name: office-rgb
   colour:
-    white_kelvin: 2700
-    rgb_gains: [1, 0.96, 0.62]
+    white_points:
+      2700: [0, 0, 0, 255]
+      6500: [240, 210, 255, 200]
     colour_temp: mixed
     colour_temp_range: [2200, 6500]
 4:
   friendly_name: kitchen
 """)
     settings = names.get_lamp_settings(3)
-    assert settings["colour"]["rgb_gains"] == [1.0, 0.96, 0.62]
+    assert settings["colour"]["white_points"] == {2700: [0, 0, 0, 255], 6500: [240, 210, 255, 200]}
     assert names.get_friendly_name(3) == "office-rgb"
     assert names.get_lamp_settings(4) == {"friendly_name": "kitchen"}
     assert names.get_lamp_settings(9) == {}
 
 
 @pytest.mark.parametrize("colour", [
-    "rgb_gains: [1, 0.9]",
-    "rgb_gains: [1, 0.9, 2]",
+    "white_points: {2700: [0, 0, 0, 255]}",
+    "white_points: {2700: [0, 0, 255], 6500: [1, 2, 3, 4]}",
+    "white_points: {2700: [0, 0, 0, 300], 6500: [1, 2, 3, 4]}",
+    "white_points: {50: [0, 0, 0, 255], 6500: [1, 2, 3, 4]}",
     "colour_temp: sometimes",
     "colour_temp_range: [6500, 2200]",
-    "white_kelvin: 50",
-    "rgb_gains_cool: [1, 1]",
+    "rgb_gains: [1, 0.9, 0.6]",
     "brightness_boost: 3",
 ])
 def test_invalid_settings_are_ignored_not_fatal(tmp_path, caplog, colour):
@@ -80,21 +78,12 @@ def test_invalid_settings_are_ignored_not_fatal(tmp_path, caplog, colour):
 # The mix
 
 
-def test_white_led_is_used_fully_from_its_own_colour_temperature():
-    mix = ColourMix.build(white_kelvin=2700)
+def test_points_set_the_range_unless_one_is_configured():
+    from dali2mqtt.colour import ColourMix
 
-    assert colour_temp_to_rgbw(370, mix)[3] == 255  # 2700 K
-    assert colour_temp_to_rgbw(450, mix)[3] == 255  # warmer: still full
-    assert 0 < colour_temp_to_rgbw(250, mix)[3] < 255  # 4000 K: blended
-    assert colour_temp_to_rgbw(153, mix)[3] == 0  # 6500 K: off
-    assert colour_temp_to_rgbw(250, mix)[3] > colour_temp_to_rgbw(250)[3]
-
-
-def test_without_white_kelvin_the_mix_is_unchanged():
-    assert colour_temp_to_rgbw(300, ColourMix.build()) == colour_temp_to_rgbw(300)
-
-
-def test_kelvin_range_becomes_the_mirek_range():
+    points = {2700: [0, 0, 0, 255], 6500: [240, 210, 255, 200]}
+    assert ColourMix.build(points).mirek_range == (154, 370)
+    assert ColourMix.build(points, [3000, 6000]).mirek_range == (167, 333)
     assert ColourMix.build(kelvin_range=[2200, 6500]).mirek_range == (154, 455)
 
 
@@ -106,10 +95,12 @@ def test_lamp_mixes_with_its_own_settings():
 
     lamp.set_colour_temp(250)
 
-    expected = colour_temp_to_rgbw(
-        250, ColourMix.build([0.954, 1.0, 0.877], 2400, None, [1.0, 0.85, 0.85])
-    )
+    expected = colour_temp_to_rgbw(250, ColourMix.build(NF_RGB["colour"]["white_points"]))
     assert device.rgbw == tuple(ha_to_dim(v) for v in expected)
+    lamp.set_colour_temp(370)
+    assert device.rgbw == (0, 0, 0, 254)  # 2700 K: the white LED alone
+    config = json.loads(lamp.gen_ha_config("t"))
+    assert (config["min_mirs"], config["max_mirs"]) == (154, 370)
 
 
 def test_configured_range_reaches_home_assistant():
@@ -172,9 +163,7 @@ def test_attributes_describe_the_lamp():
     assert attributes["dali_address"] == 3
     assert "model" not in attributes
     assert attributes["colour_temp"] == "mixed"
-    assert attributes["white_kelvin"] == 2400
-    assert attributes["rgb_gains"] == [0.954, 1.0, 0.877]
-    assert attributes["rgb_gains_cool"] == [1.0, 0.85, 0.85]
+    assert attributes["white_points"] == {2700: [0, 0, 0, 255], 6500: [240, 210, 255, 200]}
     assert json.loads(lamp.gen_ha_config("t"))["json_attr_t"] == "t/lamp/light/attributes"
 
 
@@ -195,23 +184,11 @@ def test_start_up_passes_settings_and_publishes_attributes():
         initialize_lamps(data, client)
 
     names.get_lamp_settings.assert_called_with(3)
-    assert data["all_lamps"]["office-rgb"].mix.white_kelvin == 2400
+    assert len(data["all_lamps"]["office-rgb"].mix.points) == 2
     published = {c.args[0]: c for c in client.publish.call_args_list}
     attrs = published["dali2mqtt/office-rgb/light/attributes"]
-    assert json.loads(attrs.args[1])["white_kelvin"] == 2400
+    assert json.loads(attrs.args[1])["white_points"]["2700"] == [0, 0, 0, 255]
     assert attrs.kwargs["retain"] is True
-
-
-def test_gains_move_from_the_warm_to_the_cool_set():
-    mix = ColourMix.build([0.954, 1.0, 0.877], gains_cool=[1.0, 0.8, 1.0])
-
-    assert mix.gains_at(370) == mix.gains  # 2700 K
-    assert mix.gains_at(500) == mix.gains  # warmer: the warm set
-    assert mix.gains_at(154) == mix.gains_cool  # 6500 K
-    middle = mix.gains_at(262)
-    assert all(min(w, c) <= m <= max(w, c) for w, c, m in zip(mix.gains, mix.gains_cool, middle))
-    single = ColourMix.build([0.9, 1.0, 0.8])
-    assert single.gains_at(154) == single.gains
 
 
 def test_old_reference_keys_are_tolerated(tmp_path):

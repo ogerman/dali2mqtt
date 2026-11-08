@@ -87,10 +87,7 @@ class Lamp:
         self.colour_temp_setting = colour_settings.get("colour_temp")
         self._kelvin_range = colour_settings.get("colour_temp_range")
         self.mix = colour.ColourMix.build(
-            colour_settings.get("rgb_gains"),
-            colour_settings.get("white_kelvin"),
-            self._kelvin_range,
-            colour_settings.get("rgb_gains_cool"),
+            colour_settings.get("white_points"), self._kelvin_range
         )
         if self.is_group and not colour_settings and self.members:
             mixes = {m.mix for m in self.members}
@@ -371,11 +368,8 @@ class Lamp:
         if self.has_colour_temp:
             attributes["colour_temp"] = "mixed" if self.colour_temp_emulated else "native"
             if self.colour_temp_emulated:
-                attributes["rgb_gains"] = [round(g, 3) for g in self.mix.gains]
-                if self.mix.gains_cool is not None:
-                    attributes["rgb_gains_cool"] = [round(g, 3) for g in self.mix.gains_cool]
-                if self.mix.white_kelvin:
-                    attributes["white_kelvin"] = self.mix.white_kelvin
+                if self.mix.points:
+                    attributes["white_points"] = self.mix.kelvin_points()
         return attributes
 
     def actual_level(self):

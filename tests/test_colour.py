@@ -574,52 +574,37 @@ def test_reported_levels_of_a_mixed_colour_temperature_are_recognised():
     assert lamp.colour_temp == 157
 
 
-# Strip white balance
+# Calibration points
 
 
-@pytest.fixture
-def gains():
-    from dali2mqtt import colour
+def test_points_are_interpolated_by_mirek():
+    from dali2mqtt.colour import ColourMix, colour_temp_to_rgbw
 
-    yield colour.set_rgb_gains
-    colour.set_rgb_gains((1.0, 1.0, 1.0))
+    mix = ColourMix.build({2700: [0, 0, 0, 255], 6500: [240, 210, 255, 200]})
 
-
-def test_gains_correct_the_mixed_white(gains):
-    from dali2mqtt.colour import colour_temp_to_rgbw
-
-    plain = colour_temp_to_rgbw(333)  # 3000 K
-    gains((1.0, 0.96, 0.62))  # measured on the nf strips
-    corrected = colour_temp_to_rgbw(333)
-
-    assert corrected[0] == 255
-    assert abs(corrected[1] - plain[1] * 0.96) <= 1
-    assert abs(corrected[2] - plain[2] * 0.62) <= 1
-    assert corrected[3] == plain[3]  # the W channel is not touched
+    assert mix.mirek_range == (154, 370)
+    assert colour_temp_to_rgbw(370, mix) == (0, 0, 0, 255)
+    assert colour_temp_to_rgbw(154, mix) == (240, 210, 255, 200)
+    middle = colour_temp_to_rgbw(262, mix)  # halfway in mirek
+    assert all(abs(m - e) <= 1 for m, e in zip(middle, (120, 105, 128, 228)))
+    assert colour_temp_to_rgbw(500, mix) == (0, 0, 0, 255)  # clamped
 
 
-def test_gains_are_relative(gains):
-    from dali2mqtt.colour import colour_temp_to_rgbw
+def test_three_points_interpolate_piecewise():
+    from dali2mqtt.colour import ColourMix, colour_temp_to_rgbw
 
-    gains((0.5, 0.45, 0.245))
-    half = colour_temp_to_rgbw(250)
-    gains((1.0, 0.90, 0.49))
-    assert colour_temp_to_rgbw(250) == half
+    mix = ColourMix.build({2700: [0, 0, 0, 255], 4000: [100, 100, 100, 255],
+                           6500: [240, 210, 255, 200]})
 
-
-def test_bad_gains_are_rejected(gains):
-    with pytest.raises(ValueError):
-        gains((1.0, 0.9))
-    with pytest.raises(ValueError):
-        gains((1.0, 0.0, 0.5))
+    assert colour_temp_to_rgbw(250, mix) == (100, 100, 100, 255)
+    r, g, b, w = colour_temp_to_rgbw(300, mix)  # between 2700 and 4000 K
+    assert 0 < r < 100 and w == 255
 
 
-def test_mixed_colour_temperature_uses_the_gains(gains):
-    from dali2mqtt.colour import colour_temp_to_rgbw
+def test_without_points_the_textbook_mix_is_used():
+    from dali2mqtt.colour import ColourMix, colour_temp_to_rgbw, kelvin_to_rgb
 
-    gains((1.0, 0.90, 0.49))
-    lamp, device = make_rgbw_lamp(level=100)
-    lamp.set_colour_temp(153)
-
-    assert device.rgbw == tuple(ha_to_dim(v) for v in colour_temp_to_rgbw(153))
-    assert device.rgbw[2] < device.rgbw[1] < device.rgbw[0]  # no more mint
+    mix = ColourMix.build()
+    assert colour_temp_to_rgbw(250, mix)[:3] == kelvin_to_rgb(4000)
+    assert colour_temp_to_rgbw(500, mix)[3] == 255
+    assert colour_temp_to_rgbw(153, mix)[3] == 0

@@ -18,10 +18,20 @@ def _kelvin_range(value):
 
 KELVIN = vol.All(vol.Coerce(int), vol.Range(min=1000, max=20000))
 
-GAINS = vol.All(
-    [vol.All(vol.Coerce(float), vol.Range(min=0.05, max=1.0))],
-    vol.Length(min=3, max=3),
+RGBW = vol.All(
+    [vol.All(vol.Coerce(int), vol.Range(min=0, max=255))],
+    vol.Length(min=4, max=4),
 )
+
+
+def _white_points(value):
+    if not isinstance(value, dict):
+        raise vol.Invalid("white_points must map kelvin to [r, g, b, w]")
+    points = {KELVIN(k): RGBW(v) for k, v in value.items()}
+    if len(points) < 2:
+        raise vol.Invalid("white_points needs at least two colour temperatures")
+    return points
+
 
 # Per-lamp settings next to friendly_name, for what changes how dali2mqtt
 # drives the lamp and can't be read from the bus.
@@ -30,11 +40,8 @@ LAMP_SETTINGS_SCHEMA = vol.Schema(
         vol.Optional("friendly_name"): vol.Coerce(str),
         # Strict: a misspelt colour setting is reported, not silently ignored.
         vol.Optional("colour"): vol.Schema({
-            # Colour temperature the strip's white LED really shows.
-            vol.Optional("white_kelvin"): KELVIN,
-            # Red, green, blue white balance of the strip at 2700 K and 6500 K.
-            vol.Optional("rgb_gains"): GAINS,
-            vol.Optional("rgb_gains_cool"): GAINS,
+            # Calibration: {kelvin: [r, g, b, w]} that render it, matched by eye.
+            vol.Optional("white_points"): _white_points,
             # mixed: from the RGBW channels; native: the gear's own; off: none.
             vol.Optional("colour_temp"): vol.In(["mixed", "native", "off"]),
             vol.Optional("colour_temp_range"): vol.All(

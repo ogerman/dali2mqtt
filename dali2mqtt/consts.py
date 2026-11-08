@@ -25,7 +25,6 @@ CONF_DALI_SNIFF = "dali_sniff"
 CONF_HA_DISCOVERY_PREFIX = "ha_discovery_prefix"
 CONF_LOG_LEVEL = "log_level"
 CONF_LOG_COLOR = "log_color"
-CONF_COLOUR_TEMP_RGB_GAINS = "colour_temp_rgb_gains"
 
 DEFAULT_CONFIG_FILE = "config.yaml"
 DEFAULT_DEVICES_NAMES_FILE = "devices.yaml"
@@ -38,8 +37,6 @@ DEFAULT_DALI_POLL_INTERVAL = 10  # seconds between level polls, 0 disables
 DEFAULT_DALI_SNIFF = True  # listen to other masters where the driver allows
 DEFAULT_LOG_LEVEL = "info"
 DEFAULT_LOG_COLOR = False
-# Red, green, blue factors for colour temperature mixed on RGBW gear.
-DEFAULT_COLOUR_TEMP_RGB_GAINS = [1.0, 1.0, 1.0]
 
 MQTT_DALI2MQTT_STATUS = "{}/status"
 MQTT_STATE_TOPIC = "{}/{}/light/status"

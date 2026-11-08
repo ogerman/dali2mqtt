@@ -81,16 +81,14 @@ Next to `friendly_name`, `devices.yaml` can hold settings that change how a lamp
 3:
   friendly_name: office-rgb
   colour:
-    white_kelvin: 2400                # what the strip's white LED really shows
-    rgb_gains: [0.954, 1.0, 0.877]    # red, green, blue white balance at 2700 K
-    rgb_gains_cool: [1.0, 0.96, 0.62] # ... and at 6500 K
-    colour_temp: mixed                # mixed, native or off (default: automatic)
-    colour_temp_range: [2000, 6500]
+    white_points:                  # RGBW (0..255) that render each colour temperature
+      2700: [0, 0, 0, 255]
+      6500: [240, 210, 255, 200]
+    colour_temp: mixed             # mixed, native or off (default: automatic)
+    colour_temp_range: [2700, 6500]
 ```
 
-- `white_kelvin`: the white channel is used fully from this colour temperature down to the warm end of the range and fades out towards the cool end. Measure it rather than trusting the label: the "2700 K" white of the strip above matches an RGB mix of about 2400 K.
-- `rgb_gains`: the strip's white balance at 2700 K, overriding the global `colour_temp_rgb_gains`. Find it by matching an RGB-only mix to a lamp you trust at 2700 K; the factors are that mix divided by the textbook 2700 K colour (255, 167, 87).
-- `rgb_gains_cool`: the white balance at 6500 K, blended with `rgb_gains` in between. Strips rarely fit one set of factors at both ends; without it `rgb_gains` is used throughout.
+- `white_points`: calibration points for the colour temperature mixed on RGBW gear: for each colour temperature in kelvin, the red, green, blue and white values (Home Assistant's 0..255) that render it on this strip. At least two; in between they are interpolated, and without `colour_temp_range` the slider covers the points' span. Without them a textbook mix is used, which on real strips usually looks tinted.
 - `colour_temp`: `mixed` mixes colour temperature from the RGBW channels (the default for RGBW gear), `native` uses the gear's own (for instance a MiBoxer DL-X in RGB+CCT mode, with separate cold and warm white strips), `off` hides the colour temperature control.
 - `colour_temp_range`: warmest and coolest kelvin offered; for native colour temperature it narrows the range the gear reports.
 
@@ -101,7 +99,7 @@ Lamps that implement DALI colour control (IEC 62386-209, device type 8) are dete
 
 - colour temperature capable gear gets a colour temperature slider, limited to the range the lamp renders. Values are in mireds (DALI mirek);
 - gear with red, green, blue and white channels gets an RGBW colour picker; brightness dims the colour as a whole;
-- on RGBW gear the colour temperature (2000 K to 6500 K) is mixed from the red, green, blue and white channels: RGBW gear tested so far claims its own colour temperature support but renders every value as the same white. Gear with colour temperature and no RGBW channels uses its own;
+- on RGBW gear the colour temperature is mixed from the red, green, blue and white channels (calibrate it with `white_points`, see above): RGBW gear tested so far claims its own colour temperature support but renders every value as the same white. Gear with colour temperature and no RGBW channels uses its own;
 - the active colour mode is published.
 
 ```
@@ -112,7 +110,14 @@ dali2mqtt/<lamp>/light/rgbw/status         state, "r,g,b,w"
 dali2mqtt/<lamp>/light/color_mode/status   state, color_temp or rgbw
 ```
 
-LED strips differ in how strong their red, green and blue LEDs are, so the mixed colour temperature can look tinted, minty for instance. `colour_temp_rgb_gains` in `config.yaml` corrects it with a factor per channel, red, green, blue (default `[1.0, 1.0, 1.0]`). Per-lamp `rgb_gains` and `rgb_gains_cool` in `devices.yaml` (see above) take precedence and are the better place for them.
+#### Calibrating the mixed colour temperature
+The mixed colour temperature needs `white_points` for each strip type, found by eye. A camera won't do: a strip makes white from narrow red, green and blue LEDs, and cameras see such light differently from the eye, so a mix that looks neutral on camera can look clearly coloured in the room.
+
+1. Light a sheet of white paper with a reference of the colour temperature to match: a lamp you trust at 2700 K, or an adjustable studio light at 6500 K. Switch other lights off; warm room light changes how a cool white looks.
+2. Put two candidate mixes on two RGBW lamps next to the paper with `dali2mqtt/<lamp>/light/rgbw/set`, say which is closer, keep that one and change the other a step, one channel at a time, until neither step improves it.
+3. Write the winner under that colour temperature.
+
+The Arlight RT-B60-10mm 24V RGBW-Warm strip on MiBoxer DL-X drivers matched 2700 K with its white LED alone and 6500 K with `[240, 210, 255, 200]`.
 
 Colour changes made by other masters on the bus are picked up like level changes: sniffed on hasseb, and on every driver by the periodic poll. Groups get colour when every member supports it, over the colour temperature range they all share. xy and primary N colour control are not exposed.
 
