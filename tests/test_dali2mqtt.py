@@ -128,8 +128,11 @@ def test_colour_temp_command_sets_the_gear_and_publishes_state():
     on_message_color_temp_cmd(client, data, msg)
 
     assert device.tc == 300
-    client.publish.assert_called_once_with(
+    client.publish.assert_any_call(
         "dali2mqtt/office/light/color_temp/status", 300, retain=True
+    )
+    client.publish.assert_any_call(
+        "dali2mqtt/office/light/color_mode/status", "color_temp", retain=True
     )
 
 
@@ -157,3 +160,38 @@ def test_lamp_state_includes_colour_temp():
     client.publish.assert_any_call(
         "dali2mqtt/office/light/color_temp/status", 250, retain=True
     )
+
+
+def test_rgbw_command_sets_the_gear_and_publishes_state_and_mode():
+    from dali2mqtt.bus import Bus
+    from dali2mqtt.dali2mqtt import on_message_rgbw_cmd
+    from tests.fakes import FakeGear
+
+    device = FakeGear(device_types=(8,), rgbwaf_channels=4, auto_activation=True,
+                      tc_range=(153, 370), tc=250)
+    bus = Bus(device)
+    lamp = Lamp("debug", bus, "office-rgb", Short(3))
+    data = {"driver": bus, "base_topic": "dali2mqtt", "all_lamps": {"office-rgb": lamp}}
+    client = mock.Mock()
+    msg = mock.Mock(topic="dali2mqtt/office-rgb/light/rgbw/set", payload=b"255,0,0,0")
+
+    on_message_rgbw_cmd(client, data, msg)
+
+    assert device.rgbw == (254, 0, 0, 0)
+    published = {call.args[0]: call.args[1] for call in client.publish.call_args_list}
+    assert published["dali2mqtt/office-rgb/light/rgbw/status"] == "255,0,0,0"
+    assert published["dali2mqtt/office-rgb/light/color_mode/status"] == "rgbw"
+    assert published["dali2mqtt/office-rgb/light/color_temp/status"] == 250
+
+
+def test_bad_rgbw_payload_is_logged_not_sent():
+    from dali2mqtt.dali2mqtt import on_message_rgbw_cmd
+
+    data, device = make_colour_data_object()
+    client = mock.Mock()
+    msg = mock.Mock(topic="dali2mqtt/office/light/rgbw/set", payload=b"1,2,3")
+
+    on_message_rgbw_cmd(client, data, msg)
+
+    assert device.sent == []
+    client.publish.assert_not_called()

@@ -2,13 +2,15 @@
 
 Unlike a mock with a fixed answer list, ``FakeGear`` doesn't care how many
 queries a Lamp sends or in which order. It emulates one control gear,
-optionally a device type 8 colour gear with colour temperature control, and
-the DTR registers the 16 bit colour transfers go through.
+optionally a device type 8 colour gear with colour temperature and RGBW
+control, including the DTR registers the 16 bit colour transfers go through
+and the temporary-then-activate colour model.
 """
 import dali.gear.general as gear
 from dali.frame import BackwardFrame
 from dali.gear import colour as dt8
 
+MASK8 = 255
 MASK16 = 65535
 
 
@@ -23,6 +25,7 @@ class FakeGear:
         device_types=(6,),
         tc_range=None,
         tc=None,
+        rgbw=None,
         xy=False,
         primaries=0,
         rgbwaf_channels=0,
@@ -33,14 +36,20 @@ class FakeGear:
         self.level = level
         self.device_types = list(device_types)
         self.tc_range = tc_range  # (coolest, warmest) when Tc capable
-        self.tc = tc  # current colour temperature, None when not in Tc mode
+        self.tc = tc  # colour temperature; active colour type if given
+        self.rgbw = rgbw  # (r, g, b, w) dim levels; active type if no tc
+        self.active = "tc" if tc is not None else ("rgbw" if rgbw is not None else None)
         self.xy = xy
         self.primaries = primaries
         self.rgbwaf_channels = rgbwaf_channels
         self.auto_activation = auto_activation
         self.dtr0 = 0
         self.dtr1 = 0
+        self.dtr2 = 0
+        self.rgbwaf_control = 0x3F  # factory default: every channel linked
         self.temporary_tc = None
+        self.temporary_rgb = None
+        self.temporary_waf = None
         self.sent = []
         self._enabled_type = 0
         self._next_types = []
@@ -63,27 +72,58 @@ class FakeGear:
         if isinstance(command, gear.DTR1):
             self.dtr1 = command.param
             return None
+        if isinstance(command, gear.DTR2):
+            self.dtr2 = command.param
+            return None
         if getattr(command, "devicetype", 0) and not (self.is_dt8 and enabled == 8):
-            return None if not command.is_query else command.response(None)
+            return command.response(None) if command.is_query else None
         if isinstance(command, dt8.SetTemporaryColourTemperature):
             self.temporary_tc = self.dtr0 | (self.dtr1 << 8)
             return None
+        if isinstance(command, dt8.SetTemporaryRGBWAFControl):
+            self.rgbwaf_control = self.dtr0
+            return None
+        if isinstance(command, dt8.SetTemporaryRGBDimLevel):
+            self.temporary_rgb = (self.dtr0, self.dtr1, self.dtr2)
+            return None
+        if isinstance(command, dt8.SetTemporaryWAFDimLevel):
+            self.temporary_waf = (self.dtr0, self.dtr1, self.dtr2)
+            return None
         if isinstance(command, dt8.Activate):
-            if self.temporary_tc is not None:
-                self.tc = self.temporary_tc
-                self.temporary_tc = None
+            self.activate()
             return None
         if isinstance(command, gear.DAPC):
             power = command.power
             self.level = 0 if power == 0 else min(max(power, self.min_level), self.max_level)
+            if self.auto_activation:
+                self.activate()
             return None
         if isinstance(command, gear.Off):
             self.level = 0
+            if self.auto_activation:
+                self.activate()
             return None
         if not getattr(command, "is_query", False):
             return None
         answer = self._answer(command)
         return command.response(None if answer is None else BackwardFrame(answer))
+
+    def activate(self):
+        """Apply the temporary colour, as ACTIVATE or an auto-activating level command."""
+        if self.temporary_tc is not None:
+            self.tc = self.temporary_tc
+            self.active = "tc"
+        if self.temporary_rgb is not None or self.temporary_waf is not None:
+            if self.rgbwaf_control & 0x0F:
+                raise AssertionError("RGBW dim levels sent while channels are linked")
+            red, green, blue = self.temporary_rgb or (MASK8, MASK8, MASK8)
+            white = (self.temporary_waf or (MASK8,))[0]
+            old = self.rgbw or (0, 0, 0, 0)
+            self.rgbw = tuple(
+                o if n == MASK8 else n for o, n in zip(old, (red, green, blue, white))
+            )
+            self.active = "rgbw"
+        self.temporary_tc = self.temporary_rgb = self.temporary_waf = None
 
     def _answer(self, command):
         if isinstance(command, gear.QueryControlGearPresent):
@@ -115,7 +155,7 @@ class FakeGear:
         if isinstance(command, dt8.QueryGearFeaturesStatus):
             return 1 if self.auto_activation else 0
         if isinstance(command, dt8.QueryColourStatus):
-            return 0x20 if self.tc is not None else 0
+            return {"tc": 0x20, "rgbw": 0x80}.get(self.active, 0)
         if isinstance(command, dt8.QueryColourValue):
             value = self._colour_value(self.dtr0)
             if value is None:
@@ -127,9 +167,14 @@ class FakeGear:
     def _colour_value(self, key):
         Q = dt8.QueryColourValueDTR
         if key == Q.ColourTemperatureTC:
-            return MASK16 if self.tc is None else self.tc
+            return MASK16 if self.active != "tc" else self.tc
         if key == Q.ColourTemperatureTcCoolest and self.tc_range:
             return self.tc_range[0]
         if key == Q.ColourTemperatureTcWarmest and self.tc_range:
             return self.tc_range[1]
+        channels = (Q.RedDimLevel, Q.GreenDimLevel, Q.BlueDimLevel, Q.WhiteDimLevel)
+        if key in channels:
+            if self.active != "rgbw" or self.rgbw is None:
+                return MASK16
+            return self.rgbw[channels.index(key)]
         return None

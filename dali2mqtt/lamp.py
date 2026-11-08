@@ -11,6 +11,7 @@ from dali2mqtt.consts import (
     MQTT_AVAILABLE,
     MQTT_BRIGHTNESS_COMMAND_TOPIC,
     MQTT_BRIGHTNESS_STATE_TOPIC,
+    MQTT_COLOR_MODE_STATE_TOPIC,
     MQTT_COLOR_TEMP_COMMAND_TOPIC,
     MQTT_COLOR_TEMP_STATE_TOPIC,
     MQTT_COMMAND_TOPIC,
@@ -18,6 +19,8 @@ from dali2mqtt.consts import (
     MQTT_NOT_AVAILABLE,
     MQTT_PAYLOAD_OFF,
     MQTT_PAYLOAD_ON,
+    MQTT_RGBW_COMMAND_TOPIC,
+    MQTT_RGBW_STATE_TOPIC,
     MQTT_STATE_TOPIC,
     __version__,
 )
@@ -25,6 +28,9 @@ from slugify import slugify
 
 logging.basicConfig(format=LOG_FORMAT)
 logger = logging.getLogger(__name__)
+
+# Colour types exposed to Home Assistant and the colour mode names it uses.
+HA_COLOR_MODES = {colour.COLOR_TEMP: "color_temp", colour.RGBWAF: "rgbw"}
 
 
 class Lamp:
@@ -62,7 +68,10 @@ class Lamp:
         self.colour = None
         # (coolest, warmest) colour temperature in mirek, None when unknown.
         self.colour_temp_range = None
-        self.__colour_temp = None
+        # Active colour type (a colour.* constant), None when unknown.
+        self.colour_mode = None
+        self.__colour_temp = None  # mirek
+        self.__rgbw = None  # (red, green, blue, white) dim levels 0..254
 
         self.device_name = slugify(friendly_name)
 
@@ -94,18 +103,23 @@ class Lamp:
             self._query_colour()
 
     def _query_colour(self):
-        """Find out whether the gear controls colour and what it supports."""
+        """Find out whether the gear controls colour, what it supports and shows."""
         self.device_types = colour.query_device_types(self.driver, self.short_address)
         if colour.DT8 not in self.device_types:
             return
         self.colour = colour.query_colour_features(self.driver, self.short_address)
-        if self.colour is None or colour.COLOR_TEMP not in self.colour.types:
+        if self.colour is None:
             return
-        self.colour_temp_range = colour.query_colour_temp_range(
-            self.driver, self.short_address
-        )
-        if self.colour_temp_range is not None:
-            self.__colour_temp = colour.query_colour_temp(self.driver, self.short_address)
+        if colour.COLOR_TEMP in self.colour.types:
+            self.colour_temp_range = colour.query_colour_temp_range(
+                self.driver, self.short_address
+            )
+            if self.colour_temp_range is None:
+                logger.warning(
+                    "%s supports colour temperature but its range can't be read",
+                    self.friendly_name,
+                )
+        self.update_colour(colour.read_colour_state(self.driver, self.short_address))
 
     @staticmethod
     def _group_range(members):
@@ -132,12 +146,17 @@ class Lamp:
         members = list(members or [])
         if not members or any(m.colour is None for m in members):
             return None, None
-        types = frozenset.intersection(*(m.colour.types for m in members))
+        types = frozenset(members[0].colour.types)
+        for member in members[1:]:
+            types &= frozenset(member.colour.types)
         features = colour.ColourFeatures(
-            types, auto_activation=all(m.colour.auto_activation for m in members)
+            types,
+            primaries=min(m.colour.primaries for m in members),
+            rgbwaf_channels=min(m.colour.rgbwaf_channels for m in members),
+            auto_activation=all(m.colour.auto_activation for m in members),
         )
         ranges = [m.colour_temp_range for m in members]
-        if colour.COLOR_TEMP not in types or any(r is None for r in ranges):
+        if colour.COLOR_TEMP not in features.types or any(r is None for r in ranges):
             return features, None
         coolest = max(r[0] for r in ranges)
         warmest = min(r[1] for r in ranges)
@@ -158,6 +177,26 @@ class Lamp:
             and colour.COLOR_TEMP in self.colour.types
             and self.colour_temp_range is not None
         )
+
+    @property
+    def has_rgbw(self):
+        """Return True if the lamp has red, green, blue and white channels."""
+        return (
+            self.colour is not None
+            and colour.RGBWAF in self.colour.types
+            and self.colour.rgbwaf_channels >= 4
+        )
+
+    @property
+    def ha_colour_mode(self):
+        """Return the Home Assistant colour mode name, or None if not exposed."""
+        exposed = {
+            colour.COLOR_TEMP: self.has_colour_temp,
+            colour.RGBWAF: self.has_rgbw,
+        }
+        if exposed.get(self.colour_mode):
+            return HA_COLOR_MODES[self.colour_mode]
+        return None
 
     def level_to_ha(self, level):
         """Convert a DALI level to Home Assistant brightness (0 = off).
@@ -224,6 +263,21 @@ class Lamp:
                     "max_mirs": warmest,
                 }
             )
+        if self.has_rgbw:
+            json_config.update(
+                {
+                    "rgbw_stat_t": MQTT_RGBW_STATE_TOPIC.format(
+                        mqtt_base_topic, self.device_name
+                    ),
+                    "rgbw_cmd_t": MQTT_RGBW_COMMAND_TOPIC.format(
+                        mqtt_base_topic, self.device_name
+                    ),
+                }
+            )
+        if self.has_colour_temp or self.has_rgbw:
+            json_config["clrm_stat_t"] = MQTT_COLOR_MODE_STATE_TOPIC.format(
+                mqtt_base_topic, self.device_name
+            )
         return json.dumps(json_config)
 
     def actual_level(self):
@@ -261,21 +315,52 @@ class Lamp:
             "Set lamp <%s> brightness level to %s", self.friendly_name, self.level
         )
 
+    # Colour
+
     @property
     def colour_temp(self):
         """Return the colour temperature in mirek, None while unknown."""
         return self.__colour_temp
 
-    def update_colour_temp(self, mirek):
-        """Record a colour temperature observed on the bus without sending anything.
+    @property
+    def rgbw(self):
+        """Return (red, green, blue, white) dim levels, None while unknown."""
+        return self.__rgbw
 
-        Returns True when it changed.
+    @property
+    def rgbw_ha(self):
+        """Return the RGBW levels as Home Assistant's "r,g,b,w" payload, or None."""
+        if self.__rgbw is None:
+            return None
+        return ",".join(str(colour.dim_to_ha(level)) for level in self.__rgbw)
+
+    def colour_state(self):
+        """Return the lamp's colour as a colour.ColourState."""
+        return colour.ColourState(self.colour_mode, self.__colour_temp, self.__rgbw)
+
+    def update_colour(self, state):
+        """Record colour observed on the bus without sending anything.
+
+        Only the active colour type's value is taken from ``state``; the
+        others keep their last known value. Returns True when anything changed.
         """
-        if mirek == self.__colour_temp:
+        if state is None or state.mode is None:
             return False
-        self.__colour_temp = mirek
-        logger.debug("Lamp <%s> colour temperature is now %s", self.friendly_name, mirek)
-        return True
+        changed = state.mode != self.colour_mode
+        self.colour_mode = state.mode
+        if state.mode == colour.COLOR_TEMP and state.colour_temp is not None:
+            changed |= state.colour_temp != self.__colour_temp
+            self.__colour_temp = state.colour_temp
+        elif state.mode == colour.RGBWAF and state.rgbw is not None:
+            changed |= state.rgbw != self.__rgbw
+            self.__rgbw = state.rgbw
+        if changed:
+            logger.debug("Lamp <%s> colour is now %s", self.friendly_name, self.colour_state())
+        return changed
+
+    def update_colour_temp(self, mirek):
+        """Record a colour temperature observed on the bus. Returns True on change."""
+        return self.update_colour(colour.ColourState(colour.COLOR_TEMP, colour_temp=mirek))
 
     def set_colour_temp(self, mirek):
         """Commit a colour temperature (mirek) to the ballast.
@@ -288,7 +373,7 @@ class Lamp:
         coolest, warmest = self.colour_temp_range
         mirek = min(max(int(mirek), coolest), warmest)
         colour.set_colour_temp(self.driver, self.short_address, mirek)
-        self.__colour_temp = mirek
+        self.update_colour_temp(mirek)
         for member in self.members:
             if member.has_colour_temp:
                 lo, hi = member.colour_temp_range
@@ -297,6 +382,27 @@ class Lamp:
             "Set lamp <%s> colour temperature to %s mirek", self.friendly_name, mirek
         )
         return mirek
+
+    def set_rgbw(self, rgbw):
+        """Commit Home Assistant RGBW channel values (0..255 each) to the ballast.
+
+        Returns the DALI dim levels actually set.
+        """
+        if not self.has_rgbw:
+            raise ValueError(f"{self.friendly_name} has no RGBW control")
+        values = tuple(rgbw)
+        if len(values) != 4:
+            raise ValueError(f"RGBW needs four values, got {values!r}")
+        levels = colour.set_rgbw(
+            self.driver, self.short_address, [colour.ha_to_dim(v) for v in values]
+        )
+        state = colour.ColourState(colour.RGBWAF, rgbw=levels)
+        self.update_colour(state)
+        for member in self.members:
+            if member.has_rgbw:
+                member.update_colour(state)
+        logger.debug("Set lamp <%s> RGBW to %s", self.friendly_name, levels)
+        return levels
 
     def off(self):
         """Turn off ballast."""
@@ -319,4 +425,8 @@ class Lamp:
         if self.has_colour_temp:
             coolest, warmest = self.colour_temp_range
             text += f", colour temperature: {self.colour_temp} ({coolest}..{warmest} mirek)"
+        if self.has_rgbw:
+            text += f", RGBW: {self.rgbw}"
+        if self.colour_mode is not None:
+            text += f", active colour type: {self.colour_mode}"
         return text

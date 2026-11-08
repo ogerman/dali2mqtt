@@ -74,15 +74,22 @@ Example `devices.yaml`:
 ```
 Please note that MQTT topics support a minimum set of characters, therefore friendly names are converted to slug strings, so a lamp with address 0 (as an example) in MQTT will be named "lamp-in-kitchen"
 
-### Colour temperature
-Lamps that implement DALI colour control (IEC 62386-209, device type 8) with colour temperature support are detected at start-up and get a colour temperature slider in Home Assistant, limited to the range the lamp renders. Values are in mireds (DALI mirek):
+### Colour (DT8 colour control gear)
+Lamps that implement DALI colour control (IEC 62386-209, device type 8) are detected at start-up. What Home Assistant gets depends on what the gear reports:
+
+- colour temperature capable gear gets a colour temperature slider, limited to the range the lamp renders. Values are in mireds (DALI mirek);
+- gear with red, green, blue and white channels gets an RGBW colour picker; brightness dims the colour as a whole;
+- gear with both switches between the two, and the active colour mode is published.
 
 ```
-dali2mqtt/<lamp>/light/color_temp/set     command, mireds
-dali2mqtt/<lamp>/light/color_temp/status  state, mireds
+dali2mqtt/<lamp>/light/color_temp/set      command, mireds
+dali2mqtt/<lamp>/light/color_temp/status   state, mireds
+dali2mqtt/<lamp>/light/rgbw/set            command, "r,g,b,w" 0..255 each
+dali2mqtt/<lamp>/light/rgbw/status         state, "r,g,b,w"
+dali2mqtt/<lamp>/light/color_mode/status   state, color_temp or rgbw
 ```
 
-Groups get the slider when every member supports colour temperature, over the range they all share. RGB and xy colour control are not supported yet.
+Colour changes made by other masters on the bus are picked up like level changes: sniffed on hasseb, and on every driver by the periodic poll. Groups get colour when every member supports it, over the colour temperature range they all share. xy and primary N colour control are not exposed.
 
 ### Setup systemd
 edit dali2mqtt.service and change the path of python3 to the path of your venv, after:

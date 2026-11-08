@@ -171,3 +171,23 @@ def test_other_senders_wait_for_a_running_sequence():
     other.join(1)
 
     assert [type(c).__name__ for c in driver.sent] == ["DTR0", "DTR1", "Off"]
+
+
+def test_sniffed_device_type_prefix_decodes_the_extended_command():
+    from dali.gear.colour import Activate
+
+    bus = Bus(FakeDriver())
+    listener = mock.Mock()
+    bus.add_listener(listener)
+
+    bus.on_sniffed_frame(16, gear.EnableDeviceType(8).frame.pack)
+    bus.on_sniffed_frame(16, Activate(Short(3)).frame.pack)
+
+    listener.assert_called_once()
+    (cmd, own), _ = listener.call_args
+    assert isinstance(cmd, Activate)
+    assert cmd.destination == Short(3)
+    assert own is False
+    # The prefix covers one frame only.
+    bus.on_sniffed_frame(16, gear.Off(Short(3)).frame.pack)
+    assert type(listener.call_args[0][0]).__name__ == "Off"

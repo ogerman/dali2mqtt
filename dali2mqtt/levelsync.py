@@ -1,4 +1,4 @@
-"""Keep the lamp levels dali2mqtt reports in sync with the bus.
+"""Keep the lamp levels and colours dali2mqtt reports in sync with the bus.
 
 Two sources feed one model:
 
@@ -9,7 +9,11 @@ Two sources feed one model:
 * a slow periodic poll of every lamp, which catches whatever the bus never
   showed us: missed frames, power cycles, time spent offline.
 
-Groups are never queried, their level is derived from the member lamps.
+Colour gear is re-read in the same way. Colour commands dirty its colour,
+and so do level commands when the gear activates colour automatically with
+them (IEC 62386-209, 9.12.5), or a scene recall, which always carries colour.
+
+Groups are never queried, their level and colour are derived from the members.
 """
 import logging
 import threading
@@ -17,6 +21,8 @@ import time
 
 import dali.gear.general as gear
 from dali.address import GearBroadcast, GearBroadcastUnaddressed, GearGroup, GearShort
+
+from dali2mqtt import colour
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +41,15 @@ LEVEL_COMMANDS = frozenset(
         "RecallMaxLevel", "RecallMinLevel", "StepDownAndOff", "OnAndStepUp",
         "EnableDAPCSequence", "GoToLastActiveLevel", "GoToScene",
         "ContinuousUp", "ContinuousDown",
+    ]
+)
+# Commands that change a colour gear's colour on their own.
+COLOUR_COMMANDS = frozenset(
+    [
+        "Activate",
+        "XCoordinateStepUp", "XCoordinateStepDown",
+        "YCoordinateStepUp", "YCoordinateStepDown",
+        "ColourTemperatureTcStepCooler", "ColourTemperatureTcStepWarmer",
     ]
 )
 MASK = 255
@@ -56,6 +71,7 @@ class LevelSync:
         self._lamps = {}  # short address -> Lamp
         self._groups = {}  # group number -> Lamp
         self._dirty = {}  # short address -> monotonic time of the confirming query
+        self._colour_dirty = set()  # short addresses whose colour is re-read too
         self._next_poll = None
         self._thread = None
         self._stopping = False
@@ -74,8 +90,10 @@ class LevelSync:
                 lamp.short_address.group: lamp for lamp in lamps if lamp.is_group
             }
             self._dirty.clear()
+            self._colour_dirty.clear()
             for group in self._groups.values():
                 self._update_group(group)
+                self._update_group_colour(group)
             self._wakeup.notify_all()
         logger.debug(
             "Level sync tracking %d lamps and %d groups", len(self._lamps), len(self._groups)
@@ -110,27 +128,46 @@ class LevelSync:
         """
         if command is None:
             with self._lock:
-                self._mark_dirty(self._lamps.values(), STEP_SETTLE)
+                self._mark_dirty(self._lamps.values(), STEP_SETTLE, with_colour=True)
             logger.debug("Unreadable frame on the bus, re-checking all lamps")
             return
         name = type(command).__name__
-        if name not in LEVEL_COMMANDS:
+        if name in COLOUR_COMMANDS:
+            with self._lock:
+                targets = [
+                    lamp
+                    for lamp in self._resolve(getattr(command, "destination", None))
+                    if lamp.colour is not None
+                ]
+                self._mark_dirty(targets, with_colour=True)
+        elif name in LEVEL_COMMANDS:
+            with self._lock:
+                targets = self._resolve(getattr(command, "destination", None))
+                if not targets:
+                    return
+                for lamp in targets:
+                    level = self._optimistic_level(command, lamp)
+                    if level is not None:
+                        self._set_level(lamp, level)
+                self._mark_dirty(targets)
+                # A level command also applies pending colour on gear that
+                # activates automatically; a scene always carries a colour.
+                self._colour_dirty.update(
+                    lamp.short_address.address
+                    for lamp in targets
+                    if lamp.colour is not None
+                    and (lamp.colour.auto_activation or name == "GoToScene")
+                )
+        else:
             return
-        with self._lock:
-            targets = self._resolve(getattr(command, "destination", None))
-            if not targets:
-                return
-            for lamp in targets:
-                level = self._optimistic_level(command, lamp)
-                if level is not None:
-                    self._set_level(lamp, level)
-            self._mark_dirty(targets)
+        if not targets:
+            return
         logger.debug(
             "%s %s affects %s", "Sent" if own else "Sniffed", command,
             [lamp.friendly_name for lamp in targets],
         )
 
-    def _mark_dirty(self, lamps, settle=None):
+    def _mark_dirty(self, lamps, settle=None, with_colour=False):
         """Schedule a confirming query once the lamps' fades are over."""
         now = time.monotonic()
         for lamp in lamps:
@@ -138,6 +175,8 @@ class LevelSync:
             if wait is None:
                 wait = lamp.fade_time if lamp.fade_time is not None else STEP_SETTLE
             self._dirty[lamp.short_address.address] = now + wait + self.fade_margin
+            if with_colour and lamp.colour is not None:
+                self._colour_dirty.add(lamp.short_address.address)
         self._wakeup.notify_all()
 
     def _resolve(self, destination):
@@ -188,10 +227,30 @@ class LevelSync:
         if group.update_level(level):
             self.publish(group)
 
+    def _set_colour(self, lamp, state):
+        if lamp.update_colour(state):
+            self.publish(lamp)
+        for group in self._groups.values():
+            if any(member is lamp for member in group.members):
+                self._update_group_colour(group)
+
+    def _update_group_colour(self, group):
+        """A group shows a colour when all its members show the same one."""
+        if group.colour is None or not group.members:
+            return
+        states = [member.colour_state() for member in group.members]
+        if any(state != states[0] for state in states):
+            return
+        if group.update_colour(states[0]):
+            self.publish(group)
+
     # Bus queries (never called with the model lock held)
 
-    def refresh(self, lamp):
-        """Query the lamp's actual level and apply it. Returns the level or None."""
+    def refresh(self, lamp, with_colour=False):
+        """Query the lamp's actual level, and colour if asked, and apply them.
+
+        Returns the level or None.
+        """
         if lamp.is_group:
             return None
         try:
@@ -202,9 +261,14 @@ class LevelSync:
         level = getattr(response, "value", None)
         if not isinstance(level, int) or level == MASK:
             logger.debug("No usable level from %s: %s", lamp.friendly_name, response)
-            return None
-        with self._lock:
-            self._set_level(lamp, level)
+            level = None
+        else:
+            with self._lock:
+                self._set_level(lamp, level)
+        if with_colour and lamp.colour is not None:
+            state = colour.read_colour_state(self._bus, lamp.short_address)
+            with self._lock:
+                self._set_colour(lamp, state)
         return level
 
     def _load_fade_time(self, lamp):
@@ -220,7 +284,7 @@ class LevelSync:
     # Worker
 
     def _due(self):
-        """Return (lamps needing their fade time, lamps to query, full poll?).
+        """Return (lamps needing their fade time, [(lamp, with_colour)], full poll?).
 
         Waits for the next deadline when there is nothing to do.
         """
@@ -229,11 +293,15 @@ class LevelSync:
         if self.poll_interval and self._next_poll is not None and now >= self._next_poll:
             self._next_poll = now + self.poll_interval
             self._dirty.clear()
-            return unknown_fade, list(self._lamps.values()), True
+            self._colour_dirty.clear()
+            return unknown_fade, [(lamp, True) for lamp in self._lamps.values()], True
         due = [addr for addr, when in self._dirty.items() if when <= now]
         for addr in due:
             del self._dirty[addr]
-        lamps = [self._lamps[addr] for addr in due if addr in self._lamps]
+        lamps = [
+            (self._lamps[addr], addr in self._colour_dirty) for addr in due if addr in self._lamps
+        ]
+        self._colour_dirty.difference_update(due)
         if lamps or unknown_fade:
             return unknown_fade, lamps, False
         deadlines = list(self._dirty.values())
@@ -252,14 +320,14 @@ class LevelSync:
             for lamp in unknown_fade:
                 self._load_fade_time(lamp)
             started = time.monotonic()
-            for lamp in lamps:
+            for lamp, with_colour in lamps:
                 with self._lock:
                     if self._stopping:
                         return
-                self.refresh(lamp)
+                self.refresh(lamp, with_colour)
             if full_poll:
                 logger.debug(
                     "Polled %d lamps in %.1fs", len(lamps), time.monotonic() - started
                 )
             elif lamps:
-                logger.debug("Re-checked %s", [lamp.friendly_name for lamp in lamps])
+                logger.debug("Re-checked %s", [lamp.friendly_name for lamp, _ in lamps])

@@ -155,3 +155,104 @@ def test_lamp_with_a_mock_driver_still_initializes():
 
     assert lamp.device_types == []
     assert lamp.colour is None
+
+
+# RGBW
+
+
+def make_rgbw_lamp(name="lamp", addr=3, **kwargs):
+    kwargs.setdefault("device_types", (8,))
+    kwargs.setdefault("rgbwaf_channels", 4)
+    kwargs.setdefault("auto_activation", True)
+    return make_lamp(name, addr, **kwargs)
+
+
+def test_rgbw_gear_is_discovered_with_rgbw_and_colour_mode_topics():
+    lamp, _ = make_rgbw_lamp(rgbw=(254, 0, 127, 0))
+
+    assert lamp.has_rgbw
+    assert lamp.colour_mode == RGBWAF
+    assert lamp.rgbw == (254, 0, 127, 0)
+    assert lamp.rgbw_ha == "255,0,128,0"  # 127 of 254 rounds up
+    config = json.loads(lamp.gen_ha_config("t"))
+    assert config["rgbw_cmd_t"] == "t/lamp/light/rgbw/set"
+    assert config["rgbw_stat_t"] == "t/lamp/light/rgbw/status"
+    assert config["clrm_stat_t"] == "t/lamp/light/color_mode/status"
+    assert lamp.ha_colour_mode == "rgbw"
+
+
+def test_three_channel_gear_gets_no_rgbw():
+    lamp, _ = make_rgbw_lamp(rgbwaf_channels=3)
+
+    assert not lamp.has_rgbw
+    assert "rgbw_cmd_t" not in json.loads(lamp.gen_ha_config("t"))
+
+
+def test_set_rgbw_unlinks_channels_then_writes_levels_and_activates():
+    lamp, device = make_rgbw_lamp(tc_range=(153, 370), tc=250)
+    del device.sent[:]
+
+    assert lamp.set_rgbw((255, 128, 0, 10)) == (254, 127, 0, 10)
+
+    names = [n for n in sent_names(device) if n != "EnableDeviceType"]
+    assert names == [
+        "DTR0", "SetTemporaryRGBWAFControl",
+        "DTR0", "DTR1", "DTR2", "SetTemporaryRGBDimLevel",
+        "DTR0", "DTR1", "DTR2", "SetTemporaryWAFDimLevel",
+        "Activate",
+    ]
+    assert device.rgbwaf_control == 0x80
+    assert device.rgbw == (254, 127, 0, 10)
+    assert device.active == "rgbw"
+    assert lamp.colour_mode == RGBWAF
+    assert lamp.ha_colour_mode == "rgbw"
+    assert lamp.colour_temp == 250  # last known, kept
+
+
+def test_colour_temp_after_rgbw_switches_mode_back():
+    lamp, device = make_rgbw_lamp(tc_range=(153, 370), rgbw=(254, 0, 0, 0))
+    assert lamp.ha_colour_mode == "rgbw"
+
+    lamp.set_colour_temp(200)
+
+    assert device.active == "tc"
+    assert lamp.ha_colour_mode == "color_temp"
+    assert lamp.rgbw == (254, 0, 0, 0)
+
+
+def test_rgbw_needs_four_values():
+    lamp, _ = make_rgbw_lamp()
+    with pytest.raises(ValueError):
+        lamp.set_rgbw((1, 2, 3))
+
+
+def test_rgbw_on_plain_gear_is_rejected():
+    lamp, _ = make_lamp(device_types=(6,))
+    with pytest.raises(ValueError):
+        lamp.set_rgbw((1, 2, 3, 4))
+
+
+def test_group_rgbw_goes_to_the_group_and_members():
+    a, _ = make_rgbw_lamp("a", 1)
+    b, _ = make_rgbw_lamp("b", 2)
+    device = FakeGear(device_types=(8,), rgbwaf_channels=4)
+    group = Lamp("debug", Bus(device), "group_1", Group(1), [a, b])
+    assert group.has_rgbw
+
+    group.set_rgbw((0, 255, 0, 0))
+
+    assert device.sent[-1].destination == Group(1)
+    assert a.rgbw == b.rgbw == group.rgbw == (0, 254, 0, 0)
+
+
+def test_update_colour_only_takes_the_active_value():
+    from dali2mqtt.colour import ColourState
+
+    lamp, _ = make_rgbw_lamp(tc_range=(153, 370), tc=250)
+
+    assert lamp.update_colour(ColourState(RGBWAF, rgbw=(1, 2, 3, 4)))
+    assert lamp.colour_mode == RGBWAF
+    assert lamp.colour_temp == 250
+    assert not lamp.update_colour(ColourState(RGBWAF, rgbw=(1, 2, 3, 4)))
+    assert not lamp.update_colour(None)
+    assert not lamp.update_colour(ColourState(None))

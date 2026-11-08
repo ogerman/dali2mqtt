@@ -39,6 +39,8 @@ class Bus:
         self._lock = threading.RLock()
         self._listeners = []
         self._recent_own = deque(maxlen=16)  # (frame bytes, monotonic time)
+        # Device type a sniffed EnableDeviceType announced for the next frame.
+        self._sniffed_devicetype = 0
 
     def send(self, command):
         """Send a command to the bus and return the driver's response.
@@ -103,10 +105,15 @@ class Bus:
             if frame == data and now - when < ECHO_WINDOW:
                 logger.debug("Ignoring echo of our own frame %s", data.hex())
                 return
+        devicetype, self._sniffed_devicetype = self._sniffed_devicetype, 0
         try:
-            command = from_frame(ForwardFrame(16, data))
+            command = from_frame(ForwardFrame(16, data), devicetype=devicetype)
         except Exception as err:  # pylint: disable=broad-except
             logger.debug("Can't decode sniffed frame %s: %s", data.hex(), err)
+            return
+        if isinstance(command, EnableDeviceType):
+            # Announces that the next frame is an application extended command.
+            self._sniffed_devicetype = command.param
             return
         if getattr(command, "is_query", False):
             return
