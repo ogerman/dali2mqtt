@@ -572,3 +572,54 @@ def test_reported_levels_of_a_mixed_colour_temperature_are_recognised():
     assert lamp.recognise_colour_temp(157)
     assert lamp.ha_colour_mode == "color_temp"
     assert lamp.colour_temp == 157
+
+
+# Strip white balance
+
+
+@pytest.fixture
+def gains():
+    from dali2mqtt import colour
+
+    yield colour.set_rgb_gains
+    colour.set_rgb_gains((1.0, 1.0, 1.0))
+
+
+def test_gains_correct_the_mixed_white(gains):
+    from dali2mqtt.colour import colour_temp_to_rgbw
+
+    plain = colour_temp_to_rgbw(333)  # 3000 K
+    gains((1.0, 0.90, 0.49))  # measured on the nf strips
+    corrected = colour_temp_to_rgbw(333)
+
+    assert corrected[0] == 255
+    assert corrected[1] == round(plain[1] * 0.90)
+    assert abs(corrected[2] - plain[2] * 0.49) <= 1
+    assert corrected[3] == plain[3]  # the W channel is not touched
+
+
+def test_gains_are_relative(gains):
+    from dali2mqtt.colour import colour_temp_to_rgbw
+
+    gains((0.5, 0.45, 0.245))
+    half = colour_temp_to_rgbw(250)
+    gains((1.0, 0.90, 0.49))
+    assert colour_temp_to_rgbw(250) == half
+
+
+def test_bad_gains_are_rejected(gains):
+    with pytest.raises(ValueError):
+        gains((1.0, 0.9))
+    with pytest.raises(ValueError):
+        gains((1.0, 0.0, 0.5))
+
+
+def test_mixed_colour_temperature_uses_the_gains(gains):
+    from dali2mqtt.colour import colour_temp_to_rgbw
+
+    gains((1.0, 0.90, 0.49))
+    lamp, device = make_rgbw_lamp(level=100)
+    lamp.set_colour_temp(153)
+
+    assert device.rgbw == tuple(ha_to_dim(v) for v in colour_temp_to_rgbw(153))
+    assert device.rgbw[2] < device.rgbw[1] < device.rgbw[0]  # no more mint

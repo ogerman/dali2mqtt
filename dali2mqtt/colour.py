@@ -51,6 +51,9 @@ TC_SANE = (40, 1250)
 TC_DEFAULT_RANGE = (153, 370)
 # Range of the colour temperature mixed from RGBW channels: 6500 K .. 2000 K.
 TC_EMULATED_RANGE = (153, 500)
+# Red, green, blue factors applied to the black body colour of a mixed colour
+# temperature, see set_rgb_gains.
+_rgb_gains = (1.0, 1.0, 1.0)
 # RGBWAF dim levels are arc power levels, 0..254.
 DIM_MAX = 254
 HA_MAX = 255
@@ -141,19 +144,38 @@ def kelvin_to_rgb(kelvin):
     return tuple(round(min(max(c, 0), 255)) for c in (red, green, blue))
 
 
+def set_rgb_gains(gains):
+    """Set the red, green, blue factors for mixed colour temperatures.
+
+    LED strips differ in how strong their red, green and blue LEDs are, so the
+    textbook black body mix rarely looks right. On the nf RGBW strips equal
+    channels came out minty: matching an RGB mix to the strip's own warm white
+    LED on camera gave factors of about 1.0, 0.90 and 0.49.
+    """
+    global _rgb_gains  # pylint: disable=global-statement
+    gains = tuple(float(g) for g in gains)
+    if len(gains) != 3 or not all(0 < g for g in gains):
+        raise ValueError(f"need three positive factors, got {gains!r}")
+    top = max(gains)
+    _rgb_gains = tuple(g / top for g in gains)
+
+
 def colour_temp_to_rgbw(mirek):
     """Return Home Assistant RGBW values (0..255) that render ``mirek``.
 
     For RGBW gear whose own colour temperature mode doesn't work: on the
     real bus office-rgb and living-room-rgb render every Tc as the same
-    warm white. The RGB channels make the black body colour; their W
+    warm white. The RGB channels make the black body colour, corrected by
+    the strip's factors (set_rgb_gains); their W
     channel is a warm white LED (about 3000 K), so it is blended in fully
     at the warm end and faded out towards 6500 K, where it would tint the
     white.
     """
     coolest, warmest = TC_EMULATED_RANGE
     mirek = min(max(int(mirek), coolest), warmest)
-    red, green, blue = kelvin_to_rgb(1_000_000 / mirek)
+    rgb = [c * g for c, g in zip(kelvin_to_rgb(1_000_000 / mirek), _rgb_gains)]
+    top = max(rgb) or 1
+    red, green, blue = (round(c * 255 / top) for c in rgb)
     warmth = (mirek - coolest) / (warmest - coolest)  # 0 at 6500 K, 1 at 2000 K
     white = round(255 * warmth)
     return red, green, blue, white

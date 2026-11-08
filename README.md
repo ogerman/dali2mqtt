@@ -90,6 +90,8 @@ dali2mqtt/<lamp>/light/rgbw/status         state, "r,g,b,w"
 dali2mqtt/<lamp>/light/color_mode/status   state, color_temp or rgbw
 ```
 
+LED strips differ in how strong their red, green and blue LEDs are, so the mixed colour temperature can look tinted, minty for instance. `colour_temp_rgb_gains` in `config.yaml` corrects it with a factor per channel, red, green, blue (default `[1.0, 1.0, 1.0]`). To find them, set the lamp to its white channel only and adjust an RGB-only mix until it looks the same; for a white channel of about 3000 K the RGB mix should read about 255, 177, 110, and the factors are the ratios to that. The strips this was developed on use `[1.0, 0.9, 0.49]`.
+
 Colour changes made by other masters on the bus are picked up like level changes: sniffed on hasseb, and on every driver by the periodic poll. Groups get colour when every member supports it, over the colour temperature range they all share. xy and primary N colour control are not exposed.
 
 ### Setup systemd

@@ -682,6 +682,7 @@ def main(args):
         )
 
     logger.setLevel(ALL_SUPPORTED_LOG_LEVELS[config.log_level])
+    colour.set_rgb_gains(config.colour_temp_rgb_gains)
     # The bus, level sync and driver modules log under the package name.
     logging.getLogger("dali2mqtt").setLevel(ALL_SUPPORTED_LOG_LEVELS[config.log_level])
     devices_names_config = DevicesNamesConfig(
