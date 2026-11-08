@@ -390,3 +390,17 @@ def test_out_of_range_colour_temp_readback_is_ignored():
 
     _, device = make_lamp(device_types=(8,), tc_range=(153, 370), tc=65200)
     assert read_colour_state(Bus(device), Short(1)) is None
+
+
+def test_colour_detection_survives_lost_answers():
+    from tests.test_lamp import LossyGear
+
+    driver = LossyGear(
+        {"QueryDeviceType": 2, "QueryColourTypeFeatures": 2},
+        device_types=(8,), rgbwaf_channels=4, min_level=8,
+    )
+
+    lamp = Lamp("debug", Bus(driver), "living-room-rgb", Short(12))
+
+    assert lamp.device_types == [8]
+    assert lamp.has_rgbw

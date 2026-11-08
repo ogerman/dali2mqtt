@@ -195,3 +195,54 @@ def test_bad_rgbw_payload_is_logged_not_sent():
 
     assert device.sent == []
     client.publish.assert_not_called()
+
+
+class ScanBus:
+    """Answers QUERY CONTROL GEAR PRESENT for a set of addresses."""
+
+    def __init__(self, present, flaky=(), unaddressed=False):
+        from dali.frame import BackwardFrame
+
+        self.present = set(present)
+        self.flaky = set(flaky)  # silent on the first query only
+        self.unaddressed = unaddressed
+        self.frame = BackwardFrame
+        self.asked = []
+
+    def send(self, command):
+        dest = command.destination
+        self.asked.append(dest)
+        if isinstance(dest, Short):
+            answers = dest.address in self.present
+            if dest.address in self.flaky:
+                self.flaky.discard(dest.address)
+                answers = False
+        else:
+            answers = self.unaddressed
+        return command.response(self.frame(0xFF) if answers else None)
+
+
+def test_scan_covers_all_64_addresses():
+    from dali2mqtt.dali2mqtt import dali_scan
+
+    assert dali_scan(ScanBus({0, 12, 63})) == [0, 12, 63]
+
+
+def test_scan_asks_a_silent_address_again():
+    from dali2mqtt.dali2mqtt import dali_scan
+
+    bus = ScanBus({3, 12}, flaky={12})
+    assert dali_scan(bus) == [3, 12]
+    assert bus.asked.count(Short(12)) == 2
+    assert bus.asked.count(Short(3)) == 1
+
+
+def test_scan_reports_gear_without_a_short_address(caplog):
+    from dali2mqtt.dali2mqtt import dali_scan
+
+    assert dali_scan(ScanBus({1}, unaddressed=True)) == [1]
+    assert "without a short address" in caplog.text
+
+    caplog.clear()
+    dali_scan(ScanBus({1}))
+    assert "without a short address" not in caplog.text

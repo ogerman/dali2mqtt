@@ -50,6 +50,8 @@ REPORT_LENGTH = 10
 READ_TIMEOUT_MS = 100
 RESPONSE_TIMEOUT = 2.0
 SNIFF_RESUME_DELAY = 0.2
+# Names of the answer statuses that carry no usable answer, for the log.
+ANSWER_STATUS = {1: "No answer", 4: "Answer too early"}
 # Pause after a frame that expects no answer, on top of python-dali's 20 ms.
 COMMAND_GAP = 0.04
 
@@ -209,6 +211,10 @@ class SniffingHassebDriver(SyncHassebDALIUSBDriver):
         if status in (HASSEB_DRIVER_OK, HASSEB_DRIVER_INVALID_ANSWER):
             self._response_message = data
         else:
+            logger.debug(
+                "%s to %s: %s",
+                ANSWER_STATUS.get(status, f"status {status}"), self._pending, data.hex(),
+            )
             self._response_message = None
         self._pending = None
         self._response_ready.set()

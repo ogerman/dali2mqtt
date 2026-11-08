@@ -121,21 +121,28 @@ def dim_to_ha(level):
     return round(min(max(int(level), 0), DIM_MAX) * HA_MAX / DIM_MAX)
 
 
-def query_device_types(bus, address):
-    """Return the gear's device types, [] when they can't be read."""
-    try:
-        types = bus.run_sequence(QueryDeviceTypes(address))
-    except Exception as err:  # pylint: disable=broad-except
-        logger.debug("Can't read device types of %s: %s", address, err)
-        return []
-    if not isinstance(types, list) or not all(isinstance(t, int) for t in types):
-        return []
-    return types
+def query_device_types(bus, address, attempts=3):
+    """Return the gear's device types, [] when they can't be read.
+
+    The query is repeated when an answer is lost.
+    """
+    for _ in range(attempts):
+        try:
+            types = bus.run_sequence(QueryDeviceTypes(address))
+        except Exception as err:  # pylint: disable=broad-except
+            logger.debug("Can't read device types of %s: %s", address, err)
+            continue
+        if isinstance(types, list) and all(isinstance(t, int) for t in types):
+            return types
+    return []
 
 
-def query_colour_features(bus, address):
+def query_colour_features(bus, address, attempts=3):
     """Return the gear's ColourFeatures, or None when it doesn't answer."""
-    features = bus.send(QueryColourTypeFeatures(address))
+    for _ in range(attempts):
+        features = bus.send(QueryColourTypeFeatures(address))
+        if getattr(features, "raw_value", None) is not None:
+            break
     try:
         types = set()
         if features.xy_capable:

@@ -4,6 +4,7 @@ import logging
 
 import dali.address as address
 import dali.gear.general as gear
+from dali.exceptions import DALIError
 from dali2mqtt import colour
 from dali2mqtt.consts import (
     ALL_SUPPORTED_LOG_LEVELS,
@@ -86,21 +87,36 @@ class Lamp:
             self.__level = 0  # Default to off, can't query actual level for groups
             logger.debug("Initialized group lamp %s with default values", friendly_name)
         else:
-            _min_physical_level = driver.send(gear.QueryPhysicalMinimum(short_address))
-
-            try:
-                self.min_physical_level = _min_physical_level.value
-            except Exception as err:
-                self.min_physical_level = None
-                logger.warning(
-                    "Set min_physical_level to None as %s failed: %s",
-                    _min_physical_level,
-                    err,
-                )
-            self.min_level = driver.send(gear.QueryMinLevel(short_address)).value
-            self.max_level = driver.send(gear.QueryMaxLevel(short_address)).value
-            self.level = driver.send(gear.QueryActualLevel(short_address)).value
+            self.min_physical_level = self._query_level(gear.QueryPhysicalMinimum)
+            if self.min_physical_level is None:
+                logger.warning("%s doesn't report its physical minimum", friendly_name)
+            self.min_level = self._query_level(gear.QueryMinLevel, required=True)
+            self.max_level = self._query_level(gear.QueryMaxLevel, required=True)
+            # Recorded, not sent: the lamp already is at this level.
+            self.__level = self._query_level(gear.QueryActualLevel)
+            if self.__level is None:
+                self.__level = 0
+                logger.warning("%s doesn't report its level, assuming off", friendly_name)
             self._query_colour()
+
+    def _query_level(self, command, required=False, attempts=3):
+        """Return a lamp's 8 bit answer to ``command``, or None.
+
+        Some gear loses answers now and then, so a missing one is asked again.
+        A ``required`` value that never comes raises DALIError, so the lamp is
+        skipped rather than set up with a placeholder in place of a number.
+        """
+        response = None
+        for _ in range(attempts):
+            response = self.driver.send(command(self.short_address))
+            value = getattr(response, "value", None)
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+        if required:
+            raise DALIError(
+                f"{self.friendly_name} gave no answer to {command.__name__}: {response}"
+            )
+        return None
 
     def _query_colour(self):
         """Find out whether the gear controls colour, what it supports and shows."""

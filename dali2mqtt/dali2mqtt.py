@@ -75,20 +75,43 @@ logging.basicConfig(format=LOG_FORMAT, level=os.environ.get("LOGLEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 
-def dali_scan(dali_driver):
-    """Scan a maximum number of dali devices."""
+def _gear_present(dali_driver, addr):
+    """Return True when control gear answers QUERY CONTROL GEAR PRESENT."""
+    present = dali_driver.send(gear.QueryControlGearPresent(addr))
+    return isinstance(present, YesNoResponse) and bool(present.value)
+
+
+def dali_scan(dali_driver, attempts=2):
+    """Return the short addresses (0..63) of the control gear on the bus.
+
+    An address that stays silent is asked again, since an answer can get
+    lost. Gear without a short address can't be used; it is reported.
+    """
     lamps = []
-    for lamp in range(0, 63):
-        try:
-            logging.debug("Search for Lamp %s", lamp)
-            present = dali_driver.send(
-                gear.QueryControlGearPresent(address.Short(lamp))
+    for lamp in range(64):
+        for attempt in range(attempts):
+            try:
+                logging.debug("Search for Lamp %s", lamp)
+                if _gear_present(dali_driver, address.Short(lamp)):
+                    lamps.append(lamp)
+                    logger.debug("Found lamp at address %d", lamp)
+                    if attempt:
+                        logger.info("Lamp %d only answered on attempt %d", lamp, attempt + 1)
+                    break
+            except DALIError as err:
+                logger.warning("%s not present: %s", lamp, err)
+                break
+    try:
+        answer = dali_driver.send(gear.QueryControlGearPresent(address.BroadcastUnaddressed()))
+        if isinstance(answer, YesNoResponse) and answer.value:
+            garbled = bool(getattr(answer.raw_value, "error", False))
+            logger.warning(
+                "Control gear without a short address is on the bus (%s answer); it "
+                "can't be controlled until it is given one (commissioning)",
+                "garbled, possibly several gear" if garbled else "clean",
             )
-            if isinstance(present, YesNoResponse) and present.value:
-                lamps.append(lamp)
-                logger.debug("Found lamp at address %d", lamp)
-        except DALIError as err:
-            logger.warning("%s not present: %s", lamp, err)
+    except DALIError as err:
+        logger.debug("Can't check for gear without a short address: %s", err)
     return lamps
 
 

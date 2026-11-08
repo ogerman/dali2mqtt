@@ -221,3 +221,62 @@ def test_group_of_fixed_level_devices_is_on_off_only():
     members = [make_lamp(254, 254), make_lamp(254, 254)]
     group = Lamp("debug", mock.Mock(), "group", Group(1), members)
     assert not group.dimmable
+
+
+class LossyGear:
+    """FakeGear that loses the first ``count`` answers to each named query."""
+
+    def __init__(self, losses, **gear_kwargs):
+        from tests.fakes import FakeGear
+
+        self.gear = FakeGear(**gear_kwargs)
+        self.losses = dict(losses)
+
+    def send(self, command):
+        name = type(command).__name__
+        if self.losses.get(name, 0) > 0:
+            self.losses[name] -= 1
+            self.gear.sent.append(command)
+            return command.response(None)
+        return self.gear.send(command)
+
+
+def test_lost_answers_are_asked_again():
+    """living-room-rgb loses about one answer in five on the real bus."""
+    driver = LossyGear(
+        {"QueryMinLevel": 1, "QueryMaxLevel": 2, "QueryPhysicalMinimum": 1},
+        min_level=8, max_level=254, level=146,
+    )
+
+    lamp = Lamp("debug", driver, "living-room-rgb", Short(12))
+
+    assert (lamp.min_level, lamp.max_level, lamp.level) == (8, 254, 146)
+    assert lamp.min_physical_level == 1
+
+
+def test_lamp_whose_limits_never_answer_is_skipped():
+    from dali.exceptions import DALIError
+
+    driver = LossyGear({"QueryMaxLevel": 3})
+    with pytest.raises(DALIError):
+        Lamp("debug", driver, "silent", Short(12))
+
+
+def test_unknown_physical_minimum_and_level_have_safe_defaults():
+    driver = LossyGear({"QueryPhysicalMinimum": 3, "QueryActualLevel": 3}, min_level=8)
+
+    lamp = Lamp("debug", driver, "lamp", Short(1))
+
+    assert lamp.min_physical_level is None
+    assert lamp.level == 0
+
+
+def test_start_up_sends_no_level():
+    """The lamp is already at the level it reports; re-sending it is noise."""
+    from tests.fakes import FakeGear
+
+    device = FakeGear(level=120)
+    lamp = Lamp("debug", device, "lamp", Short(1))
+
+    assert lamp.level == 120
+    assert not any(type(c).__name__ == "DAPC" for c in device.sent)
