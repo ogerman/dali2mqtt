@@ -365,6 +365,36 @@ class Lamp:
         """Record a colour temperature observed on the bus. Returns True on change."""
         return self.update_colour(colour.ColourState(colour.COLOR_TEMP, colour_temp=mirek))
 
+    def _lit_levels(self):
+        """Return [(address, level)] of the lamps this lamp addresses that are on."""
+        lamps = self.members if self.is_group else [self]
+        return [
+            (lamp.short_address, lamp.level)
+            for lamp in lamps
+            if isinstance(lamp.level, int) and 0 < lamp.level < 255
+        ]
+
+    def _apply_colour(self, write):
+        """Run ``write(activate)`` and keep the lamps at their brightness.
+
+        Colour gear has been seen jumping to full brightness on a colour
+        change (the hardware colour picker on the same bus re-sends the level
+        after every colour). So the level of every lit lamp is sent again
+        afterwards. On a single lamp with automatic activation that DAPC
+        also activates the colour, in one fade; otherwise ACTIVATE goes first.
+        """
+        lit = self._lit_levels()
+        auto = (
+            not self.is_group
+            and bool(lit)
+            and self.colour is not None
+            and self.colour.auto_activation
+        )
+        result = write(not auto)
+        for addr, level in lit:
+            self.driver.send(gear.DAPC(addr, level))
+        return result
+
     def set_colour_temp(self, mirek):
         """Commit a colour temperature (mirek) to the ballast.
 
@@ -375,7 +405,11 @@ class Lamp:
             raise ValueError(f"{self.friendly_name} has no colour temperature control")
         coolest, warmest = self.colour_temp_range
         mirek = min(max(int(mirek), coolest), warmest)
-        colour.set_colour_temp(self.driver, self.short_address, mirek)
+        self._apply_colour(
+            lambda activate: colour.set_colour_temp(
+                self.driver, self.short_address, mirek, activate
+            )
+        )
         self.update_colour_temp(mirek)
         for member in self.members:
             if member.has_colour_temp:
@@ -396,8 +430,13 @@ class Lamp:
         values = tuple(rgbw)
         if len(values) != 4:
             raise ValueError(f"RGBW needs four values, got {values!r}")
-        levels = colour.set_rgbw(
-            self.driver, self.short_address, [colour.ha_to_dim(v) for v in values]
+        levels = self._apply_colour(
+            lambda activate: colour.set_rgbw(
+                self.driver,
+                self.short_address,
+                [colour.ha_to_dim(v) for v in values],
+                activate,
+            )
         )
         state = colour.ColourState(colour.RGBWAF, rgbw=levels)
         self.update_colour(state)

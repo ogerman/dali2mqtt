@@ -21,11 +21,11 @@ from dali.gear.colour import (
     QueryColourValueDTR,
     QueryGearFeaturesStatus,
     SetTemporaryRGBDimLevel,
+    SetTemporaryColourTemperature,
     SetTemporaryRGBWAFControl,
     SetTemporaryWAFDimLevel,
 )
 from dali.gear.general import DTR0, DTR1, DTR2, QueryContentDTR0
-from dali.gear.sequences import SetDT8ColourValueTc
 from dali.sequences import QueryDeviceTypes
 
 logger = logging.getLogger(__name__)
@@ -213,10 +213,22 @@ def query_colour_temp_range(bus, address):
     return None
 
 
+def plausible_xy(xy):
+    """Return True for a real chromaticity: x, y > 0 and x + y <= 1.
+
+    Gear has been seen answering near-MASK garbage (x, y around 0.995).
+    """
+    x, y = xy
+    return isinstance(x, int) and isinstance(y, int) and x > 0 and y > 0 and x + y <= 65536
+
+
 def read_colour_state(bus, address):
     """Return the gear's ColourState, or None when it can't be read.
 
     Only the active colour type's value is read; the others are MASK anyway.
+    A state is only returned when that value is readable and plausible: some
+    gear answers garbage, and a wrong reading would overwrite a colour that
+    was set correctly.
     """
     try:
         status = bus.send(QueryColourStatus(address))
@@ -230,34 +242,49 @@ def read_colour_state(bus, address):
         if getattr(status, attr, False):
             mode = name
             break
+    keys = _VALUE_KEYS.get(mode)
+    if not keys:
+        logger.debug("%s colour type %s is not read", address, mode)
+        return None
+    values = query_colour_values(bus, address, keys)
+    found = tuple(values.get(key) for key in keys)
     state = ColourState(mode)
-    keys = _VALUE_KEYS.get(mode, ())
-    values = query_colour_values(bus, address, keys) if keys else {}
-    if mode == COLOR_TEMP:
-        state.colour_temp = values.get(Q.ColourTemperatureTC)
-    elif mode == RGBWAF:
-        levels = tuple(values.get(key) for key in keys)
-        if all(isinstance(level, int) and level <= DIM_MAX for level in levels):
-            state.rgbw = levels
-        else:
-            logger.debug("Unusable RGBW levels from %s: %s", address, levels)
-    elif mode == XY:
-        xy = tuple(values.get(key) for key in keys)
-        if all(isinstance(v, int) for v in xy):
-            state.xy = xy
+    if mode == COLOR_TEMP and isinstance(found[0], int) and TC_SANE[0] <= found[0] <= TC_SANE[1]:
+        state.colour_temp = found[0]
+    elif mode == RGBWAF and all(isinstance(v, int) and v <= DIM_MAX for v in found):
+        state.rgbw = found
+    elif mode == XY and plausible_xy(found):
+        state.xy = found
+    else:
+        logger.debug("Implausible %s colour from %s: %s", mode, address, found)
+        return None
     logger.debug("%s colour state %s", address, state)
     return state
 
 
-def set_colour_temp(bus, address, mirek):
-    """Set and activate a colour temperature; works for groups too."""
+def colour_temp_sequence(address, mirek, activate=True):
+    """Sequence setting a colour temperature, then activating it if asked."""
+    yield DTR0(mirek & 0xFF)
+    yield DTR1(mirek >> 8)
+    yield SetTemporaryColourTemperature(address)
+    if activate:
+        yield Activate(address)
+
+
+def set_colour_temp(bus, address, mirek, activate=True):
+    """Set a colour temperature, activating it unless asked not to.
+
+    Works for groups too. Without activation the value waits in the gear's
+    temporary register for an ACTIVATE or, on gear with automatic
+    activation, the next arc power command.
+    """
     mirek = min(max(int(mirek), TC_MIN), TC_MAX)
-    bus.run_sequence(SetDT8ColourValueTc(address, mirek))
+    bus.run_sequence(colour_temp_sequence(address, mirek, activate))
     return mirek
 
 
-def rgbw_sequence(address, red, green, blue, white):
-    """Sequence setting RGBW dim levels and activating them.
+def rgbw_sequence(address, red, green, blue, white, activate=True):
+    """Sequence setting RGBW dim levels, then activating them if asked.
 
     The control byte goes first: with channels linked (the factory default)
     the gear ignores dim levels, see RGBWAF_NORMALISED_UNLINKED. Amber and
@@ -273,13 +300,17 @@ def rgbw_sequence(address, red, green, blue, white):
     yield DTR1(MASK8)
     yield DTR2(MASK8)
     yield SetTemporaryWAFDimLevel(address)
-    yield Activate(address)
+    if activate:
+        yield Activate(address)
 
 
-def set_rgbw(bus, address, rgbw):
-    """Set and activate RGBW dim levels (0..254 each); works for groups too."""
+def set_rgbw(bus, address, rgbw, activate=True):
+    """Set RGBW dim levels (0..254 each), activating them unless asked not to.
+
+    Works for groups too; see set_colour_temp for activation.
+    """
     levels = tuple(min(max(int(level), 0), DIM_MAX) for level in rgbw)
     if len(levels) != 4:
         raise ValueError("RGBW needs four levels")
-    bus.run_sequence(rgbw_sequence(address, *levels))
+    bus.run_sequence(rgbw_sequence(address, *levels, activate=activate))
     return levels

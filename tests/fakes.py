@@ -29,6 +29,7 @@ class FakeGear:
         tc=None,
         rgbw=None,
         xy=False,
+        xy_value=None,
         primaries=0,
         rgbwaf_channels=0,
         auto_activation=False,
@@ -43,6 +44,9 @@ class FakeGear:
         self.tc = tc  # colour temperature; active colour type if given
         self.rgbw = rgbw  # (r, g, b, w) dim levels; active type if no tc
         self.active = "tc" if tc is not None else ("rgbw" if rgbw is not None else None)
+        self.xy_value = xy_value  # (x, y) in 1/65536; active type if given
+        if xy_value is not None:
+            self.active = "xy"
         self.xy = xy
         self.primaries = primaries
         self.rgbwaf_channels = rgbwaf_channels
@@ -159,7 +163,7 @@ class FakeGear:
         if isinstance(command, dt8.QueryGearFeaturesStatus):
             return 1 if self.auto_activation else 0
         if isinstance(command, dt8.QueryColourStatus):
-            return {"tc": 0x20, "rgbw": 0x80}.get(self.active, 0)
+            return {"xy": 0x10, "tc": 0x20, "rgbw": 0x80}.get(self.active, 0)
         if isinstance(command, dt8.QueryColourValue):
             value = self._colour_value(self.dtr0)
             if value is None:
@@ -180,6 +184,10 @@ class FakeGear:
             return self.tc_physical_range[0]
         if key == Q.ColourTemperatureTcPhysicalWarmest and self.tc_range:
             return self.tc_physical_range[1]
+        if key in (Q.XCoordinate, Q.YCoordinate):
+            if self.active != "xy":
+                return MASK16
+            return self.xy_value[0 if key == Q.XCoordinate else 1]
         channels = (Q.RedDimLevel, Q.GreenDimLevel, Q.BlueDimLevel, Q.WhiteDimLevel)
         if key in channels:
             if self.active != "rgbw" or self.rgbw is None:

@@ -182,6 +182,7 @@ def make_rgbw_lamp(name="lamp", addr=3, **kwargs):
     kwargs.setdefault("device_types", (8,))
     kwargs.setdefault("rgbwaf_channels", 4)
     kwargs.setdefault("auto_activation", True)
+    kwargs.setdefault("min_level", 8)  # like the RGB lamps on the real bus
     return make_lamp(name, addr, **kwargs)
 
 
@@ -274,3 +275,118 @@ def test_update_colour_only_takes_the_active_value():
     assert not lamp.update_colour(ColourState(RGBWAF, rgbw=(1, 2, 3, 4)))
     assert not lamp.update_colour(None)
     assert not lamp.update_colour(ColourState(None))
+
+
+# Brightness is kept across colour changes
+
+
+def commands_after(device, mark):
+    return [c for c in device.sent[mark:] if type(c).__name__ != "EnableDeviceType"]
+
+
+def test_colour_on_a_lit_auto_activating_lamp_is_activated_by_restoring_its_level():
+    lamp, device = make_rgbw_lamp(level=63)
+    mark = len(device.sent)
+
+    lamp.set_rgbw((255, 0, 0, 0))
+
+    sent = commands_after(device, mark)
+    names = [type(c).__name__ for c in sent]
+    assert "Activate" not in names
+    assert names[-1] == "DAPC" and sent[-1].power == 63
+    assert device.rgbw == (254, 0, 0, 0)  # auto activation applied it
+    assert device.level == 63
+
+
+def test_colour_on_a_lit_lamp_without_auto_activation_activates_then_restores():
+    lamp, device = make_rgbw_lamp(level=63, auto_activation=False)
+    mark = len(device.sent)
+
+    lamp.set_rgbw((0, 255, 0, 0))
+
+    names = [type(c).__name__ for c in commands_after(device, mark)]
+    assert names[-2:] == ["Activate", "DAPC"]
+    assert device.rgbw == (0, 254, 0, 0)
+    assert device.level == 63
+
+
+def test_colour_on_an_off_lamp_only_activates():
+    lamp, device = make_rgbw_lamp(level=0)
+    mark = len(device.sent)
+
+    lamp.set_rgbw((0, 0, 255, 0))
+
+    names = [type(c).__name__ for c in commands_after(device, mark)]
+    assert names[-1] == "Activate"
+    assert "DAPC" not in names
+    assert device.level == 0
+
+
+def test_colour_temp_restores_the_level_too():
+    lamp, device = make_lamp(device_types=(8,), tc_range=(153, 370), tc=250, level=120,
+                             auto_activation=True)
+    mark = len(device.sent)
+
+    lamp.set_colour_temp(300)
+
+    sent = commands_after(device, mark)
+    assert [type(c).__name__ for c in sent][-1] == "DAPC"
+    assert device.tc == 300
+    assert device.level == 120
+
+
+def test_group_colour_activates_the_group_and_restores_each_lit_member():
+    a, _ = make_rgbw_lamp("a", 1, level=60)
+    b, _ = make_rgbw_lamp("b", 2, level=0)
+    c, _ = make_rgbw_lamp("c", 4, level=200)
+    device = FakeGear(device_types=(8,), rgbwaf_channels=4)
+    group = Lamp("debug", Bus(device), "group_1", Group(1), [a, b, c])
+    mark = len(device.sent)
+
+    group.set_rgbw((255, 255, 255, 0))
+
+    sent = commands_after(device, mark)
+    tail = [(type(cmd).__name__, cmd.destination) for cmd in sent[-3:]]
+    assert tail == [("Activate", Group(1)), ("DAPC", Short(1)), ("DAPC", Short(4))]
+    assert [cmd.power for cmd in sent[-2:]] == [60, 200]
+
+
+# Readback that can't be right is ignored
+
+
+def test_garbage_xy_readback_is_ignored():
+    from dali2mqtt.colour import read_colour_state
+
+    _, device = make_rgbw_lamp(xy_value=(65194, 65243))
+    assert read_colour_state(Bus(device), Short(3)) is None
+
+
+def test_real_xy_readback_is_kept():
+    from dali2mqtt.colour import XY, read_colour_state
+
+    _, device = make_rgbw_lamp(xy_value=(48145, 17388))  # saturated red
+    state = read_colour_state(Bus(device), Short(3))
+    assert state.mode == XY
+    assert state.xy == (48145, 17388)
+
+
+def test_commanded_colour_survives_a_garbage_readback():
+    from dali2mqtt.colour import read_colour_state
+
+    lamp, device = make_rgbw_lamp(xy_value=(65194, 65243), level=63)
+    assert lamp.colour_mode is None  # nothing believable at start-up
+
+    lamp.set_rgbw((255, 0, 0, 0))
+    device.active = "xy"  # the gear keeps claiming xy
+    assert not lamp.update_colour(read_colour_state(lamp.driver, lamp.short_address))
+
+    assert lamp.colour_mode == RGBWAF
+    assert lamp.rgbw == (254, 0, 0, 0)
+    assert lamp.ha_colour_mode == "rgbw"
+
+
+def test_out_of_range_colour_temp_readback_is_ignored():
+    from dali2mqtt.colour import read_colour_state
+
+    _, device = make_lamp(device_types=(8,), tc_range=(153, 370), tc=65200)
+    assert read_colour_state(Bus(device), Short(1)) is None
