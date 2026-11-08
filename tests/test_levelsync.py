@@ -9,7 +9,7 @@ from dali.frame import BackwardFrame
 
 from dali2mqtt.bus import Bus
 from dali2mqtt.lamp import Lamp
-from dali2mqtt.levelsync import LevelSync
+from dali2mqtt.levelsync import MAX_RESENDS, LevelSync
 
 
 def make_lamp(addr, min_level=85, max_level=254, level=0):
@@ -328,3 +328,78 @@ def test_group_colour_follows_members_when_they_agree():
     assert group.colour_mode == "rgbwaf"
     assert group.rgbw == (1, 2, 3, 4)
     assert publish.call_args_list[-1].args[0] is group
+
+
+# Own commands the gear missed
+
+
+def test_missed_own_command_is_sent_again():
+    """living-room-rgb ignored a DAPC sent while the poll was busy."""
+    sync, bus, driver, publish, lamps = make_sync(levels={0: 109, 1: 0, 2: 0})
+    kitchen = lamps["kitchen"]
+    kitchen.update_level(109)
+
+    bus.send(gear.DAPC(Short(0), 244))
+    assert kitchen.level == 244
+    del driver.sent[:]
+
+    sync.refresh(kitchen)  # the gear still reads 109
+
+    assert [type(c).__name__ for c in driver.sent] == ["QueryActualLevel", "DAPC"]
+    assert driver.sent[-1].power == 244
+    assert kitchen.level == 244  # the old level is not taken as the truth
+
+    driver.levels[0] = 244  # this time it arrived
+    sync.refresh(kitchen)
+    assert kitchen.level == 244
+    assert sync._expected == {}
+
+
+def test_missed_off_is_resent_as_off():
+    sync, bus, driver, publish, lamps = make_sync(levels={0: 150, 1: 0, 2: 0})
+    lamps["kitchen"].update_level(150)
+
+    bus.send(gear.Off(Short(0)))
+    del driver.sent[:]
+    sync.refresh(lamps["kitchen"])
+
+    assert type(driver.sent[-1]).__name__ == "Off"
+
+
+def test_resending_gives_up_and_accepts_the_reading():
+    sync, bus, driver, publish, lamps = make_sync(levels={0: 109, 1: 0, 2: 0})
+    kitchen = lamps["kitchen"]
+
+    bus.send(gear.DAPC(Short(0), 244))
+    for _ in range(MAX_RESENDS):
+        sync.refresh(kitchen)
+        assert kitchen.level == 244
+    sync.refresh(kitchen)
+
+    assert kitchen.level == 109
+    resends = [c for c in driver.sent if type(c).__name__ == "DAPC"]
+    assert len(resends) == 1 + MAX_RESENDS
+
+
+def test_another_masters_command_cancels_the_resend():
+    sync, bus, driver, publish, lamps = make_sync(levels={0: 80, 1: 0, 2: 0})
+    kitchen = lamps["kitchen"]
+
+    bus.send(gear.DAPC(Short(0), 244))
+    bus.on_sniffed_frame(16, gear.DAPC(Short(0), 80).frame.pack)  # wall switch
+    del driver.sent[:]
+    sync.refresh(kitchen)
+
+    assert [type(c).__name__ for c in driver.sent] == ["QueryActualLevel"]
+    assert kitchen.level == 80
+
+
+def test_expectation_expires():
+    sync, bus, driver, publish, lamps = make_sync(levels={0: 109, 1: 0, 2: 0})
+    kitchen = lamps["kitchen"]
+
+    bus.send(gear.DAPC(Short(0), 244))
+    with mock.patch("dali2mqtt.levelsync.time.monotonic", return_value=time.monotonic() + 60):
+        sync.refresh(kitchen)
+
+    assert kitchen.level == 109

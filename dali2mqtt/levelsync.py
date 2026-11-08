@@ -14,6 +14,12 @@ and so do level commands when the gear activates colour automatically with
 them (IEC 62386-209, 9.12.5), or a scene recall, which always carries colour.
 
 Groups are never queried, their level and colour are derived from the members.
+
+Gear can miss a command: on the real bus living-room-rgb ignored a DAPC
+sent while the poll was busy. When the confirming query after one of our
+own level commands reads something else, the command is sent again, up to
+MAX_RESENDS times, instead of taking the old level as the truth. A command
+from another master in between cancels that.
 """
 import logging
 import threading
@@ -53,6 +59,10 @@ COLOUR_COMMANDS = frozenset(
     ]
 )
 MASK = 255
+# Own level commands confirmed by a query: how often to resend a missed one,
+# and how long the expectation lasts.
+MAX_RESENDS = 2
+EXPECT_WINDOW = 15.0
 
 
 class LevelSync:
@@ -72,6 +82,9 @@ class LevelSync:
         self._groups = {}  # group number -> Lamp
         self._dirty = {}  # short address -> monotonic time of the confirming query
         self._colour_dirty = set()  # short addresses whose colour is re-read too
+        # short address -> [level, resends so far, monotonic deadline] of our own
+        # last level command, until a confirming query agrees.
+        self._expected = {}
         self._next_poll = None
         self._thread = None
         self._stopping = False
@@ -91,6 +104,7 @@ class LevelSync:
             }
             self._dirty.clear()
             self._colour_dirty.clear()
+            self._expected.clear()
             for group in self._groups.values():
                 self._update_group(group)
                 self._update_group_colour(group)
@@ -149,6 +163,7 @@ class LevelSync:
                     level = self._optimistic_level(command, lamp)
                     if level is not None:
                         self._set_level(lamp, level)
+                    self._expect(lamp, level if own else None)
                 self._mark_dirty(targets)
                 # A level command also applies pending colour on gear that
                 # activates automatically; a scene always carries a colour.
@@ -166,6 +181,50 @@ class LevelSync:
             "%s %s affects %s", "Sent" if own else "Sniffed", command,
             [lamp.friendly_name for lamp in targets],
         )
+
+    def _expect(self, lamp, level):
+        """Remember the level our own command should leave the lamp at.
+
+        ``level=None`` forgets it: another master changed the lamp, or the
+        command's outcome can't be predicted.
+        """
+        addr = lamp.short_address.address
+        if level is None:
+            self._expected.pop(addr, None)
+            return
+        deadline = time.monotonic() + EXPECT_WINDOW
+        known = self._expected.get(addr)
+        if known is not None and known[0] == level:
+            known[2] = deadline  # a resend, or the same level again
+        else:
+            self._expected[addr] = [level, 0, deadline]
+
+    def _check_expected(self, lamp, level):
+        """Return True when ``level`` read back means our command was missed.
+
+        Counts the resend; gives up after MAX_RESENDS and accepts the reading.
+        """
+        addr = lamp.short_address.address
+        known = self._expected.get(addr)
+        if known is None:
+            return False
+        wanted, resends, deadline = known
+        if level == wanted or time.monotonic() > deadline:
+            del self._expected[addr]
+            return False
+        if resends >= MAX_RESENDS:
+            del self._expected[addr]
+            logger.warning(
+                "%s stays at level %s after %d resends of level %s",
+                lamp.friendly_name, level, resends, wanted,
+            )
+            return False
+        known[1] += 1
+        logger.info(
+            "%s missed level %s (reads %s), sending it again (%d/%d)",
+            lamp.friendly_name, wanted, level, known[1], MAX_RESENDS,
+        )
+        return True
 
     def _mark_dirty(self, lamps, settle=None, with_colour=False):
         """Schedule a confirming query once the lamps' fades are over."""
@@ -259,12 +318,25 @@ class LevelSync:
             logger.warning("Can't query level of %s: %s", lamp.friendly_name, err)
             return None
         level = getattr(response, "value", None)
+        resend = None
         if not isinstance(level, int) or level == MASK:
             logger.debug("No usable level from %s: %s", lamp.friendly_name, response)
             level = None
         else:
             with self._lock:
-                self._set_level(lamp, level)
+                if self._check_expected(lamp, level):
+                    resend = self._expected[lamp.short_address.address][0]
+                else:
+                    self._set_level(lamp, level)
+        if resend is not None:
+            if resend:
+                command = gear.DAPC(lamp.short_address, resend)
+            else:
+                command = gear.Off(lamp.short_address)
+            try:
+                self._bus.send(command)  # on_command schedules the next check
+            except Exception as err:  # pylint: disable=broad-except
+                logger.warning("Can't resend level to %s: %s", lamp.friendly_name, err)
         if with_colour and lamp.colour is not None:
             state = colour.read_colour_state(self._bus, lamp.short_address)
             with self._lock:
