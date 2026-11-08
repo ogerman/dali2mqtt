@@ -489,3 +489,24 @@ def test_group_of_rgbw_lamps_mixes_colour_temperature():
     assert not any(type(c).__name__ == "SetTemporaryColourTemperature" for c in device.sent)
     assert a.colour_temp == b.colour_temp == 300
     assert a.ha_colour_mode == "color_temp"
+
+
+def test_readback_in_a_mode_home_assistant_is_not_offered_is_ignored():
+    from dali2mqtt.colour import XY, ColourState
+
+    lamp, _ = make_rgbw_lamp(rgbw=(254, 0, 0, 0))
+    assert lamp.ha_colour_mode == "rgbw"
+
+    assert not lamp.update_colour(ColourState(XY, xy=(48145, 17388)))
+    assert lamp.ha_colour_mode == "rgbw"
+
+
+def test_seed_colour_only_fills_an_unknown_state():
+    lamp, _ = make_rgbw_lamp(xy_value=(48145, 17388))
+    assert lamp.colour_mode is None
+
+    assert not lamp.seed_colour(colour_temp=300)
+    assert lamp.seed_colour(mode="color_temp")
+    assert lamp.colour_temp == 300
+    assert not lamp.seed_colour(mode="rgbwaf", rgbw=(1, 2, 3, 4))
+    assert lamp.ha_colour_mode == "color_temp"

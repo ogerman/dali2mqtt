@@ -378,7 +378,9 @@ class Lamp:
         Only the active colour type's value is taken from ``state``; the
         others keep their last known value. Returns True when anything changed.
         """
-        if state is None or state.mode is None:
+        if state is None or state.mode not in HA_COLOR_MODES:
+            # Modes Home Assistant isn't offered (xy, primary N) can't be shown,
+            # and living-room-rgb reports a stuck xy point whatever it shows.
             return False
         if (
             self.colour_mode == colour.COLOR_TEMP
@@ -398,6 +400,42 @@ class Lamp:
         if changed:
             logger.debug("Lamp <%s> colour is now %s", self.friendly_name, self.colour_state())
         return changed
+
+    def seed_colour(self, mode=None, colour_temp=None, rgbw=None, emulated_rgbw=None):
+        """Take colour state from elsewhere while the lamp's own is unknown.
+
+        Used for gear that can't report its colour: after a restart the last
+        state dali2mqtt published (retained on the broker) or the state of
+        the lamp object a rescan replaces. Nothing is sent to the bus.
+        Returns True when the colour mode became known.
+        """
+        if self.colour_mode is not None:
+            return False
+        if colour_temp is not None and self.__colour_temp is None:
+            self.__colour_temp = colour_temp
+        if rgbw is not None and self.__rgbw is None:
+            self.__rgbw = tuple(rgbw)
+        if emulated_rgbw is not None and self._emulated_rgbw is None:
+            self._emulated_rgbw = tuple(emulated_rgbw)
+        if mode in HA_COLOR_MODES:
+            self.colour_mode = mode
+            logger.debug("Lamp <%s> colour taken over: %s", self.friendly_name, self.colour_state())
+            return True
+        return False
+
+    def adopt_colour(self, previous):
+        """Carry colour state over from the lamp object a rescan replaces."""
+        if (
+            previous.colour_mode == colour.COLOR_TEMP
+            and previous._emulated_rgbw is not None
+            and self.colour_mode == colour.RGBWAF
+            and self.rgbw == previous._emulated_rgbw
+        ):
+            # The gear reports the RGBW levels of a mixed colour temperature.
+            self.colour_mode = None
+        self.seed_colour(
+            previous.colour_mode, previous.colour_temp, previous.rgbw, previous._emulated_rgbw
+        )
 
     def update_colour_temp(self, mirek):
         """Record a colour temperature observed on the bus. Returns True on change."""
