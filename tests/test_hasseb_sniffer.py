@@ -48,11 +48,13 @@ def test_sniffed_length_in_bits_is_accepted():
 def test_sniffer_errors_and_idle_reports_are_dropped():
     on_frame = mock.Mock()
     driver, _ = make_driver(on_frame)
+    driver.on_frame_error = mock.Mock()
 
     driver._handle_report(report(6, data=b"\xfe\x05"))
     driver._handle_report(report(0))
 
     on_frame.assert_not_called()
+    driver.on_frame_error.assert_called_once_with()
 
 
 def test_answer_is_matched_by_sequence_number():

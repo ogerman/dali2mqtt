@@ -197,6 +197,25 @@ def test_refresh_ignores_mask_and_failures():
     publish.assert_not_called()
 
 
+def test_unreadable_frame_rechecks_every_lamp():
+    sync, bus, driver, publish, lamps = make_sync(levels={0: 11, 1: 0, 2: 33})
+
+    bus.on_sniffed_error()
+    publish.assert_not_called()
+
+    sync.start()
+    try:
+        deadline = time.time() + 2
+        while lamps["bath"].level != 33 and time.time() < deadline:
+            time.sleep(0.01)
+    finally:
+        sync.stop()
+
+    assert lamps["kitchen"].level == 11
+    assert lamps["bath"].level == 33
+    assert sum(isinstance(c, gear.QueryActualLevel) for c in driver.sent) == 3
+
+
 def test_unrelated_commands_are_ignored():
     sync, bus, _, publish, lamps = make_sync()
     bus.on_sniffed_frame(16, gear.SetMaxLevel(Short(0)).frame.pack)

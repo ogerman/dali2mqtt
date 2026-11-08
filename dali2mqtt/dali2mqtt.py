@@ -547,6 +547,7 @@ def main(args):
     if hasattr(dali_driver, "start"):
         # The hasseb reader thread feeds sniffed frames into the bus.
         dali_driver.on_frame = bus.on_sniffed_frame
+        dali_driver.on_frame_error = bus.on_sniffed_error
         dali_driver.start(sniff=config.dali_sniff)
     sync.start()
     logger.info(

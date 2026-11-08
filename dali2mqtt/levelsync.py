@@ -104,7 +104,15 @@ class LevelSync:
     # Bus traffic
 
     def on_command(self, command, own):
-        """Apply a command seen on the bus to the model."""
+        """Apply a command seen on the bus to the model.
+
+        ``command=None`` means a frame went by unread: every lamp is re-checked.
+        """
+        if command is None:
+            with self._lock:
+                self._mark_dirty(self._lamps.values(), STEP_SETTLE)
+            logger.debug("Unreadable frame on the bus, re-checking all lamps")
+            return
         name = type(command).__name__
         if name not in LEVEL_COMMANDS:
             return
@@ -112,18 +120,25 @@ class LevelSync:
             targets = self._resolve(getattr(command, "destination", None))
             if not targets:
                 return
-            now = time.monotonic()
             for lamp in targets:
                 level = self._optimistic_level(command, lamp)
                 if level is not None:
                     self._set_level(lamp, level)
-                settle = lamp.fade_time if lamp.fade_time is not None else STEP_SETTLE
-                self._dirty[lamp.short_address.address] = now + settle + self.fade_margin
-            self._wakeup.notify_all()
+            self._mark_dirty(targets)
         logger.debug(
             "%s %s affects %s", "Sent" if own else "Sniffed", command,
             [lamp.friendly_name for lamp in targets],
         )
+
+    def _mark_dirty(self, lamps, settle=None):
+        """Schedule a confirming query once the lamps' fades are over."""
+        now = time.monotonic()
+        for lamp in lamps:
+            wait = settle
+            if wait is None:
+                wait = lamp.fade_time if lamp.fade_time is not None else STEP_SETTLE
+            self._dirty[lamp.short_address.address] = now + wait + self.fade_margin
+        self._wakeup.notify_all()
 
     def _resolve(self, destination):
         if isinstance(destination, GearShort):

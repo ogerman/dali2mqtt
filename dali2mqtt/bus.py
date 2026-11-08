@@ -22,7 +22,8 @@ class Bus:
     Listeners registered with ``add_listener`` are called as
     ``listener(command, own)`` for every non-query command that went out on
     the bus: the ones we sent (``own=True``) and, on drivers that can sniff,
-    the ones other masters sent (``own=False``).
+    the ones other masters sent (``own=False``). A frame the interface saw
+    but could not read is reported as ``command=None``.
     """
 
     def __init__(self, driver):
@@ -74,6 +75,13 @@ class Bus:
             return
         logger.debug("Sniffed %s", command)
         self._notify(command, False)
+
+    def on_sniffed_error(self):
+        """A frame went by that the interface could not read.
+
+        Listeners get ``command=None``: something changed, nobody knows what.
+        """
+        self._notify(None, False)
 
     def _notify(self, command, own):
         for listener in list(self._listeners):

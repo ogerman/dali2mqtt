@@ -52,9 +52,10 @@ class SniffingHassebDriver(SyncHassebDALIUSBDriver):
     # keep reporting it so existing entities are not duplicated.
     driver_name = SyncHassebDALIUSBDriver.__name__
 
-    def __init__(self, path=None, on_frame=None):
+    def __init__(self, path=None, on_frame=None, on_frame_error=None):
         super().__init__(path)
         self.on_frame = on_frame
+        self.on_frame_error = on_frame_error
         self._response_ready = threading.Event()
         self._stop = threading.Event()
         self._reader = None
@@ -171,7 +172,11 @@ class SniffingHassebDriver(SyncHassebDALIUSBDriver):
         if status == HASSEB_DRIVER_NO_DATA_AVAILABLE:
             return
         if status == HASSEB_DRIVER_SNIFFER_BYTE_ERROR:
+            # The firmware zeroes the data, so only the fact that something
+            # happened on the bus survives.
             logger.debug("Sniffed frame with error: %s", data.hex())
+            if self.on_frame_error is not None:
+                self.on_frame_error()
             return
         if status == HASSEB_DRIVER_SNIFFER_BYTE:
             length = data[4]
