@@ -284,17 +284,17 @@ def commands_after(device, mark):
     return [c for c in device.sent[mark:] if type(c).__name__ != "EnableDeviceType"]
 
 
-def test_colour_on_a_lit_auto_activating_lamp_is_activated_by_restoring_its_level():
-    lamp, device = make_rgbw_lamp(level=63)
+def test_colour_is_activated_even_when_the_gear_claims_auto_activation():
+    """office-rgb claims automatic activation, yet a DAPC alone left its colour."""
+    lamp, device = make_rgbw_lamp(level=63, auto_activation=True)
     mark = len(device.sent)
 
     lamp.set_rgbw((255, 0, 0, 0))
 
     sent = commands_after(device, mark)
-    names = [type(c).__name__ for c in sent]
-    assert "Activate" not in names
-    assert names[-1] == "DAPC" and sent[-1].power == 63
-    assert device.rgbw == (254, 0, 0, 0)  # auto activation applied it
+    assert [type(c).__name__ for c in sent][-2:] == ["Activate", "DAPC"]
+    assert sent[-1].power == 63
+    assert device.rgbw == (254, 0, 0, 0)
     assert device.level == 63
 
 

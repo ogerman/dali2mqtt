@@ -375,22 +375,20 @@ class Lamp:
         ]
 
     def _apply_colour(self, write):
-        """Run ``write(activate)`` and keep the lamps at their brightness.
+        """Run ``write()`` and keep the lamps at their brightness.
+
+        The colour is always activated with ACTIVATE. Leaving that to a DAPC
+        on gear that reports automatic activation did not work on the real
+        bus: office-rgb claims the feature, but its answers are unreliable
+        and the colour never changed.
 
         Colour gear has been seen jumping to full brightness on a colour
-        change (the hardware colour picker on the same bus re-sends the level
-        after every colour). So the level of every lit lamp is sent again
-        afterwards. On a single lamp with automatic activation that DAPC
-        also activates the colour, in one fade; otherwise ACTIVATE goes first.
+        change, and the hardware colour picker on the same bus re-sends the
+        level after every colour. So the level of every lit lamp is sent
+        again afterwards.
         """
         lit = self._lit_levels()
-        auto = (
-            not self.is_group
-            and bool(lit)
-            and self.colour is not None
-            and self.colour.auto_activation
-        )
-        result = write(not auto)
+        result = write()
         for addr, level in lit:
             self.driver.send(gear.DAPC(addr, level))
         return result
@@ -406,9 +404,7 @@ class Lamp:
         coolest, warmest = self.colour_temp_range
         mirek = min(max(int(mirek), coolest), warmest)
         self._apply_colour(
-            lambda activate: colour.set_colour_temp(
-                self.driver, self.short_address, mirek, activate
-            )
+            lambda: colour.set_colour_temp(self.driver, self.short_address, mirek)
         )
         self.update_colour_temp(mirek)
         for member in self.members:
@@ -431,11 +427,8 @@ class Lamp:
         if len(values) != 4:
             raise ValueError(f"RGBW needs four values, got {values!r}")
         levels = self._apply_colour(
-            lambda activate: colour.set_rgbw(
-                self.driver,
-                self.short_address,
-                [colour.ha_to_dim(v) for v in values],
-                activate,
+            lambda: colour.set_rgbw(
+                self.driver, self.short_address, [colour.ha_to_dim(v) for v in values]
             )
         )
         state = colour.ColourState(colour.RGBWAF, rgbw=levels)
