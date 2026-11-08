@@ -1,5 +1,4 @@
 """Tests for config."""
-
 from dali2mqtt.config import Config
 from unittest import mock
 

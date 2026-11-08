@@ -9,7 +9,7 @@ from dali.frame import BackwardFrame
 
 from dali2mqtt.bus import Bus
 from dali2mqtt.lamp import Lamp
-from dali2mqtt.levelsync import LevelSync
+from dali2mqtt.levelsync import MAX_RESENDS, LevelSync
 
 
 def make_lamp(addr, min_level=85, max_level=254, level=0):
@@ -221,3 +221,185 @@ def test_unrelated_commands_are_ignored():
     bus.on_sniffed_frame(16, gear.SetMaxLevel(Short(0)).frame.pack)
     bus.on_sniffed_frame(16, gear.DAPC(Short(60), 10).frame.pack)
     publish.assert_not_called()
+
+
+# Colour
+
+
+def make_colour_sync(**gear_kwargs):
+    from tests.fakes import FakeGear
+
+    gear_kwargs.setdefault("device_types", (8,))
+    device = FakeGear(**gear_kwargs)
+    bus = Bus(device)
+    publish = mock.Mock()
+    sync = LevelSync(bus, publish=publish, poll_interval=0, fade_margin=0)
+    lamp = Lamp("debug", bus, "rgb", Short(3))
+    lamp.fade_time = 0.0
+    sync.set_lamps({"rgb": lamp})
+    publish.reset_mock()
+    del device.sent[:]
+    return sync, bus, device, publish, lamp
+
+
+def test_activate_marks_colour_for_re_reading():
+    sync, bus, device, publish, lamp = make_colour_sync(rgbwaf_channels=4, rgbw=(0, 0, 0, 0))
+    from dali.gear.colour import Activate
+
+    bus.on_sniffed_frame(16, gear.EnableDeviceType(8).frame.pack)
+    bus.on_sniffed_frame(16, Activate(Short(3)).frame.pack)
+
+    assert 3 in sync._dirty
+    assert 3 in sync._colour_dirty
+
+
+def test_level_command_dirties_colour_only_with_auto_activation():
+    sync, bus, _, _, _ = make_colour_sync(
+        rgbwaf_channels=4, rgbw=(0, 0, 0, 0), auto_activation=True
+    )
+    bus.on_sniffed_frame(16, gear.DAPC(Short(3), 100).frame.pack)
+    assert 3 in sync._colour_dirty
+
+    sync, bus, _, _, _ = make_colour_sync(
+        rgbwaf_channels=4, rgbw=(0, 0, 0, 0), auto_activation=False
+    )
+    bus.on_sniffed_frame(16, gear.DAPC(Short(3), 100).frame.pack)
+    assert 3 not in sync._colour_dirty
+    bus.on_sniffed_frame(16, gear.GoToScene(Short(3), 1).frame.pack)
+    assert 3 in sync._colour_dirty
+
+
+def test_refresh_with_colour_reads_the_active_type_and_publishes():
+    sync, bus, device, publish, lamp = make_colour_sync(
+        rgbwaf_channels=4, tc_range=(153, 370), tc=250
+    )
+    assert lamp.colour_mode == "color_temp"
+
+    # Another master switched the gear to a colour.
+    device.rgbw = (200, 10, 0, 0)
+    device.active = "rgbw"
+    sync.refresh(lamp, with_colour=True)
+
+    assert lamp.colour_mode == "rgbwaf"
+    assert lamp.rgbw == (200, 10, 0, 0)
+    assert lamp.colour_temp == 250
+    publish.assert_called_once_with(lamp)
+
+    publish.reset_mock()
+    sync.refresh(lamp, with_colour=True)
+    publish.assert_not_called()
+
+
+def test_due_hands_out_colour_flags():
+    sync, bus, device, publish, lamp = make_colour_sync(rgbwaf_channels=4, rgbw=(0, 0, 0, 0))
+    from dali.gear.colour import Activate
+
+    bus.send(Activate(Short(3)))
+    time.sleep(0.01)
+    with sync._lock:
+        _, due, full = sync._due()
+    assert full is False
+    assert due == [(lamp, True)]
+    assert sync._colour_dirty == set()
+
+    bus.send(gear.DAPC(Short(3), 100))
+    time.sleep(0.01)
+    with sync._lock:
+        _, due, _ = sync._due()
+    assert due == [(lamp, False)]
+
+
+def test_group_colour_follows_members_when_they_agree():
+    from dali2mqtt.colour import ColourState
+
+    sync, bus, device, publish, lamps = make_sync()
+    a, b = lamps["kitchen"], lamps["hall"]
+    for lamp in (a, b):
+        lamp.colour = mock.Mock(
+            types={"rgbwaf"}, primaries=0, rgbwaf_channels=4, auto_activation=True
+        )
+    group = lamps["group_1"]
+    group.colour, group.colour_temp_range = Lamp._group_colour([a, b])
+
+    sync._set_colour(a, ColourState("rgbwaf", rgbw=(1, 2, 3, 4)))
+    assert group.colour_mode is None  # b still unknown
+
+    sync._set_colour(b, ColourState("rgbwaf", rgbw=(1, 2, 3, 4)))
+    assert group.colour_mode == "rgbwaf"
+    assert group.rgbw == (1, 2, 3, 4)
+    assert publish.call_args_list[-1].args[0] is group
+
+
+# Own commands the gear missed
+
+
+def test_missed_own_command_is_sent_again():
+    """living-room-rgb ignored a DAPC sent while the poll was busy."""
+    sync, bus, driver, publish, lamps = make_sync(levels={0: 109, 1: 0, 2: 0})
+    kitchen = lamps["kitchen"]
+    kitchen.update_level(109)
+
+    bus.send(gear.DAPC(Short(0), 244))
+    assert kitchen.level == 244
+    del driver.sent[:]
+
+    sync.refresh(kitchen)  # the gear still reads 109
+
+    assert [type(c).__name__ for c in driver.sent] == ["QueryActualLevel", "DAPC"]
+    assert driver.sent[-1].power == 244
+    assert kitchen.level == 244  # the old level is not taken as the truth
+
+    driver.levels[0] = 244  # this time it arrived
+    sync.refresh(kitchen)
+    assert kitchen.level == 244
+    assert sync._expected == {}
+
+
+def test_missed_off_is_resent_as_off():
+    sync, bus, driver, publish, lamps = make_sync(levels={0: 150, 1: 0, 2: 0})
+    lamps["kitchen"].update_level(150)
+
+    bus.send(gear.Off(Short(0)))
+    del driver.sent[:]
+    sync.refresh(lamps["kitchen"])
+
+    assert type(driver.sent[-1]).__name__ == "Off"
+
+
+def test_resending_gives_up_and_accepts_the_reading():
+    sync, bus, driver, publish, lamps = make_sync(levels={0: 109, 1: 0, 2: 0})
+    kitchen = lamps["kitchen"]
+
+    bus.send(gear.DAPC(Short(0), 244))
+    for _ in range(MAX_RESENDS):
+        sync.refresh(kitchen)
+        assert kitchen.level == 244
+    sync.refresh(kitchen)
+
+    assert kitchen.level == 109
+    resends = [c for c in driver.sent if type(c).__name__ == "DAPC"]
+    assert len(resends) == 1 + MAX_RESENDS
+
+
+def test_another_masters_command_cancels_the_resend():
+    sync, bus, driver, publish, lamps = make_sync(levels={0: 80, 1: 0, 2: 0})
+    kitchen = lamps["kitchen"]
+
+    bus.send(gear.DAPC(Short(0), 244))
+    bus.on_sniffed_frame(16, gear.DAPC(Short(0), 80).frame.pack)  # wall switch
+    del driver.sent[:]
+    sync.refresh(kitchen)
+
+    assert [type(c).__name__ for c in driver.sent] == ["QueryActualLevel"]
+    assert kitchen.level == 80
+
+
+def test_expectation_expires():
+    sync, bus, driver, publish, lamps = make_sync(levels={0: 109, 1: 0, 2: 0})
+    kitchen = lamps["kitchen"]
+
+    bus.send(gear.DAPC(Short(0), 244))
+    with mock.patch("dali2mqtt.levelsync.time.monotonic", return_value=time.monotonic() + 60):
+        sync.refresh(kitchen)
+
+    assert kitchen.level == 109

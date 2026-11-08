@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 import random
 import re
@@ -14,7 +15,8 @@ from dali.exceptions import DALIError
 
 from dali2mqtt.bus import Bus
 from dali2mqtt.devicesnamesconfig import DevicesNamesConfig
-from dali2mqtt.lamp import Lamp
+from dali2mqtt import colour
+from dali2mqtt.lamp import HA_COLOR_MODES, Lamp
 from dali2mqtt.levelsync import LevelSync
 from dali2mqtt.config import Config
 from dali2mqtt.consts import (
@@ -46,6 +48,7 @@ from dali2mqtt.consts import (
     MIN_BACKOFF_TIME,
     MAX_BACKOFF_TIME,
     MIN_HASSEB_FIRMWARE_VERSION,
+    MQTT_ATTRIBUTES_TOPIC,
     MQTT_AVAILABLE,
     MQTT_BRIGHTNESS_COMMAND_TOPIC,
     MQTT_BRIGHTNESS_GET_COMMAND_TOPIC,
@@ -53,11 +56,16 @@ from dali2mqtt.consts import (
     MQTT_BRIGHTNESS_MIN_LEVEL_TOPIC,
     MQTT_BRIGHTNESS_PHYSICAL_MINIMUM_LEVEL_TOPIC,
     MQTT_BRIGHTNESS_STATE_TOPIC,
+    MQTT_COLOR_MODE_STATE_TOPIC,
+    MQTT_COLOR_TEMP_COMMAND_TOPIC,
+    MQTT_COLOR_TEMP_STATE_TOPIC,
     MQTT_COMMAND_TOPIC,
     MQTT_DALI2MQTT_STATUS,
     MQTT_NOT_AVAILABLE,
     MQTT_PAYLOAD_OFF,
     MQTT_PAYLOAD_ON,
+    MQTT_RGBW_COMMAND_TOPIC,
+    MQTT_RGBW_STATE_TOPIC,
     MQTT_SCAN_LAMPS_COMMAND_TOPIC,
     MQTT_STATE_TOPIC,
     RED_COLOR,
@@ -70,20 +78,43 @@ logging.basicConfig(format=LOG_FORMAT, level=os.environ.get("LOGLEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 
-def dali_scan(dali_driver):
-    """Scan a maximum number of dali devices."""
+def _gear_present(dali_driver, addr):
+    """Return True when control gear answers QUERY CONTROL GEAR PRESENT."""
+    present = dali_driver.send(gear.QueryControlGearPresent(addr))
+    return isinstance(present, YesNoResponse) and bool(present.value)
+
+
+def dali_scan(dali_driver, attempts=2):
+    """Return the short addresses (0..63) of the control gear on the bus.
+
+    An address that stays silent is asked again, since an answer can get
+    lost. Gear without a short address can't be used; it is reported.
+    """
     lamps = []
-    for lamp in range(0, 63):
-        try:
-            logging.debug("Search for Lamp %s", lamp)
-            present = dali_driver.send(
-                gear.QueryControlGearPresent(address.Short(lamp))
+    for lamp in range(64):
+        for attempt in range(attempts):
+            try:
+                logging.debug("Search for Lamp %s", lamp)
+                if _gear_present(dali_driver, address.Short(lamp)):
+                    lamps.append(lamp)
+                    logger.debug("Found lamp at address %d", lamp)
+                    if attempt:
+                        logger.info("Lamp %d only answered on attempt %d", lamp, attempt + 1)
+                    break
+            except DALIError as err:
+                logger.warning("%s not present: %s", lamp, err)
+                break
+    try:
+        answer = dali_driver.send(gear.QueryControlGearPresent(address.BroadcastUnaddressed()))
+        if isinstance(answer, YesNoResponse) and answer.value:
+            garbled = bool(getattr(answer.raw_value, "error", False))
+            logger.warning(
+                "Control gear without a short address is on the bus (%s answer); it "
+                "can't be controlled until it is given one (commissioning)",
+                "garbled, possibly several gear" if garbled else "clean",
             )
-            if isinstance(present, YesNoResponse) and present.value:
-                lamps.append(lamp)
-                logger.debug("Found lamp at address %d", lamp)
-        except DALIError as err:
-            logger.warning("%s not present: %s", lamp, err)
+    except DALIError as err:
+        logger.debug("Can't check for gear without a short address: %s", err)
     return lamps
 
 
@@ -154,7 +185,7 @@ def initialize_lamps(data_object, client):
         len(lamps),
     )
 
-    def create_mqtt_lamp(address, name, members=None):
+    def create_mqtt_lamp(address, name, members=None, settings=None):
         try:
             lamp_object = Lamp(
                 log_level,
@@ -162,22 +193,23 @@ def initialize_lamps(data_object, client):
                 name,
                 address,
                 members,
+                settings,
             )
 
+            previous = data_object["all_lamps"].get(name)
+            if previous is not None:
+                # A rescan replaces the lamp object; keep the colour state of
+                # gear that can't report its own.
+                lamp_object.adopt_colour(previous)
             data_object["all_lamps"][name] = lamp_object
 
+            # Discovery first: Home Assistant rebuilds an entity whose config
+            # changed and only learns its state from messages that follow.
             mqtt_data = [
                 (
                     HA_DISCOVERY_PREFIX.format(ha_prefix, name),
                     lamp_object.gen_ha_config(mqtt_base_topic),
                     True,
-                ),
-                (
-                    MQTT_BRIGHTNESS_STATE_TOPIC.format(
-                        mqtt_base_topic, lamp_object.device_name
-                    ),
-                    lamp_object.level_to_ha(lamp_object.level),
-                    False,
                 ),
                 (
                     MQTT_BRIGHTNESS_MAX_LEVEL_TOPIC.format(mqtt_base_topic, name),
@@ -196,14 +228,15 @@ def initialize_lamps(data_object, client):
                     lamp_object.min_physical_level,
                     True,
                 ),
-                (
-                    MQTT_STATE_TOPIC.format(mqtt_base_topic, lamp_object.device_name),
-                    MQTT_PAYLOAD_ON if lamp_object.level > 0 else MQTT_PAYLOAD_OFF,
-                    False,
-                ),
             ]
             for topic, payload, retain in mqtt_data:
-                client.publish(topic, payload, retain)
+                client.publish(topic, payload, retain=retain)
+            client.publish(
+                MQTT_ATTRIBUTES_TOPIC.format(mqtt_base_topic, lamp_object.device_name),
+                json.dumps(lamp_object.ha_attributes()),
+                retain=True,
+            )
+            publish_lamp_state(client, mqtt_base_topic, lamp_object)
 
             logger.info(lamp_object)
             return lamp_object
@@ -219,6 +252,7 @@ def initialize_lamps(data_object, client):
         lamps_by_address[lamp] = create_mqtt_lamp(
             short_address,
             devices_names_config.get_friendly_name(short_address.address),
+            settings=devices_names_config.get_lamp_settings(short_address.address),
         )
 
     groups = scan_groups(driver, lamps)
@@ -240,7 +274,7 @@ def initialize_lamps(data_object, client):
 
 
 def publish_lamp_state(mqtt_client, mqtt_base_topic, lamp):
-    """Publish a lamp's current on/off state and brightness."""
+    """Publish a lamp's current on/off state, brightness and colour."""
     mqtt_client.publish(
         MQTT_STATE_TOPIC.format(mqtt_base_topic, lamp.device_name),
         MQTT_PAYLOAD_ON if lamp.level > 0 else MQTT_PAYLOAD_OFF,
@@ -251,6 +285,29 @@ def publish_lamp_state(mqtt_client, mqtt_base_topic, lamp):
         lamp.level_to_ha(lamp.level),
         retain=True,
     )
+    publish_colour_state(mqtt_client, mqtt_base_topic, lamp)
+
+
+def publish_colour_state(mqtt_client, mqtt_base_topic, lamp, retain=True):
+    """Publish a lamp's colour temperature, RGBW levels and active colour mode."""
+    if lamp.has_colour_temp and lamp.colour_temp is not None:
+        mqtt_client.publish(
+            MQTT_COLOR_TEMP_STATE_TOPIC.format(mqtt_base_topic, lamp.device_name),
+            lamp.colour_temp,
+            retain=retain,
+        )
+    if lamp.has_rgbw and lamp.rgbw_ha is not None:
+        mqtt_client.publish(
+            MQTT_RGBW_STATE_TOPIC.format(mqtt_base_topic, lamp.device_name),
+            lamp.rgbw_ha,
+            retain=retain,
+        )
+    if lamp.ha_colour_mode is not None:
+        mqtt_client.publish(
+            MQTT_COLOR_MODE_STATE_TOPIC.format(mqtt_base_topic, lamp.device_name),
+            lamp.ha_colour_mode,
+            retain=retain,
+        )
 
 
 def on_detect_changes_in_config(mqtt_client):
@@ -300,6 +357,60 @@ def on_message_cmd(mqtt_client, data_object, msg):
             logger.error("Failed to set light <%s> to ON: %s", light, err)
         except KeyError:
             logger.error("Lamp %s doesn't exists", light)
+
+
+def on_message_colour_state(mqtt_client, data_object, msg):
+    """Take back the colour state dali2mqtt published before a restart.
+
+    The state topics are retained, so subscribing to them replays the last
+    colour mode, colour temperature and RGBW levels of every lamp. Gear that
+    can't report its own colour starts with an unknown colour mode, which
+    makes Home Assistant hide the brightness too; such a lamp takes the
+    replayed state and publishes it again. Lamps that know their colour
+    ignore these messages, which also covers dali2mqtt's own publishes.
+    """
+    base = re.escape(data_object["base_topic"])
+    match = re.fullmatch(base + r"/(.+?)/light/(color_mode|color_temp|rgbw)/status", msg.topic)
+    if match is None:
+        return
+    light, kind = match.groups()
+    try:
+        lamp_object = get_lamp_object(data_object, light)
+    except KeyError:
+        return
+    if lamp_object.colour is None:
+        return
+    payload = msg.payload.decode("utf-8", "replace").strip()
+    if lamp_object.colour_mode is not None:
+        # The gear reported its colour; a retained colour temperature can
+        # still say that the RGBW levels it reported mix that temperature.
+        if kind == "color_temp" and lamp_object._emulated_rgbw is None:
+            try:
+                mirek = int(float(payload))
+            except ValueError:
+                return
+            if lamp_object.recognise_colour_temp(mirek):
+                publish_colour_state(mqtt_client, data_object["base_topic"], lamp_object)
+        return
+    try:
+        if kind == "color_mode":
+            mode = {name: mode for mode, name in HA_COLOR_MODES.items()}.get(payload)
+            known = lamp_object.seed_colour(mode=mode)
+        elif kind == "color_temp":
+            known = lamp_object.seed_colour(colour_temp=int(float(payload)))
+        else:
+            levels = tuple(colour.ha_to_dim(int(float(v))) for v in payload.split(","))
+            if len(levels) != 4:
+                return
+            known = lamp_object.seed_colour(rgbw=levels)
+    except ValueError:
+        logger.debug("Ignoring retained %s for <%s>: %r", kind, light, payload)
+        return
+    if known:
+        logger.info(
+            "Lamp <%s> colour restored from the broker: %s", light, lamp_object.ha_colour_mode
+        )
+        publish_colour_state(mqtt_client, data_object["base_topic"], lamp_object)
 
 
 def on_message_reinitialize_lamps_cmd(mqtt_client, data_object, msg):
@@ -364,6 +475,55 @@ def on_message_brightness_cmd(mqtt_client, data_object, msg):
         logger.error("Lamp %s doesn't exists", light)
 
 
+def on_message_color_temp_cmd(mqtt_client, data_object, msg):
+    """Callback on MQTT colour temperature command message (mireds)."""
+    logger.debug("Color temperature Command on %s: %s", msg.topic, msg.payload)
+    light = re.search(
+        MQTT_COLOR_TEMP_COMMAND_TOPIC.format(data_object["base_topic"], "(.+?)"),
+        msg.topic,
+    ).group(1)
+    try:
+        lamp_object = get_lamp_object(data_object, light)
+    except KeyError:
+        logger.error("Lamp %s doesn't exists", light)
+        return
+    payload = msg.payload.decode("utf-8", "replace")
+    try:
+        mirek = lamp_object.set_colour_temp(int(float(payload)))
+    except ValueError as err:
+        logger.error("Can't set colour temperature of <%s> to <%s>: %s", light, payload, err)
+        return
+    except DALIError as err:
+        logger.error("Failed to set colour temperature of <%s>: %s", light, err)
+        return
+    logger.debug("Set light <%s> colour temperature to %s mirek", light, mirek)
+    publish_colour_state(mqtt_client, data_object["base_topic"], lamp_object)
+
+
+def on_message_rgbw_cmd(mqtt_client, data_object, msg):
+    """Callback on MQTT RGBW command message ("r,g,b,w", 0..255 each)."""
+    logger.debug("RGBW Command on %s: %s", msg.topic, msg.payload)
+    light = re.search(
+        MQTT_RGBW_COMMAND_TOPIC.format(data_object["base_topic"], "(.+?)"), msg.topic
+    ).group(1)
+    try:
+        lamp_object = get_lamp_object(data_object, light)
+    except KeyError:
+        logger.error("Lamp %s doesn't exists", light)
+        return
+    payload = msg.payload.decode("utf-8", "replace")
+    try:
+        levels = lamp_object.set_rgbw(int(float(v)) for v in payload.split(","))
+    except ValueError as err:
+        logger.error("Can't set RGBW of <%s> to <%s>: %s", light, payload, err)
+        return
+    except DALIError as err:
+        logger.error("Failed to set RGBW of <%s>: %s", light, err)
+        return
+    logger.debug("Set light <%s> RGBW to %s", light, levels)
+    publish_colour_state(mqtt_client, data_object["base_topic"], lamp_object)
+
+
 def on_message_brightness_get_cmd(mqtt_client, data_object, msg):
     """Callback on MQTT brightness get command message."""
     logger.debug("Brightness Get Command on %s: %s", msg.topic, msg.payload)
@@ -425,6 +585,11 @@ def on_connect(
             (MQTT_COMMAND_TOPIC.format(mqtt_base_topic, "+"), 0),
             (MQTT_BRIGHTNESS_COMMAND_TOPIC.format(mqtt_base_topic, "+"), 0),
             (MQTT_BRIGHTNESS_GET_COMMAND_TOPIC.format(mqtt_base_topic, "+"), 0),
+            (MQTT_COLOR_TEMP_COMMAND_TOPIC.format(mqtt_base_topic, "+"), 0),
+            (MQTT_RGBW_COMMAND_TOPIC.format(mqtt_base_topic, "+"), 0),
+            (MQTT_COLOR_MODE_STATE_TOPIC.format(mqtt_base_topic, "+"), 0),
+            (MQTT_COLOR_TEMP_STATE_TOPIC.format(mqtt_base_topic, "+"), 0),
+            (MQTT_RGBW_STATE_TOPIC.format(mqtt_base_topic, "+"), 0),
             (MQTT_SCAN_LAMPS_COMMAND_TOPIC.format(mqtt_base_topic), 0),
             (HA_STATUS_TOPIC.format(ha_prefix), 0),
         ]
@@ -480,6 +645,20 @@ def create_mqtt_client(
         MQTT_BRIGHTNESS_GET_COMMAND_TOPIC.format(mqtt_base_topic, "+"),
         on_message_brightness_get_cmd,
     )
+    mqttc.message_callback_add(
+        MQTT_COLOR_TEMP_COMMAND_TOPIC.format(mqtt_base_topic, "+"),
+        on_message_color_temp_cmd,
+    )
+    mqttc.message_callback_add(
+        MQTT_RGBW_COMMAND_TOPIC.format(mqtt_base_topic, "+"),
+        on_message_rgbw_cmd,
+    )
+    for topic in (
+        MQTT_COLOR_MODE_STATE_TOPIC,
+        MQTT_COLOR_TEMP_STATE_TOPIC,
+        MQTT_RGBW_STATE_TOPIC,
+    ):
+        mqttc.message_callback_add(topic.format(mqtt_base_topic, "+"), on_message_colour_state)
     mqttc.message_callback_add(
         MQTT_SCAN_LAMPS_COMMAND_TOPIC.format(mqtt_base_topic),
         on_message_reinitialize_lamps_cmd,

@@ -177,6 +177,8 @@ def test_end_to_end_with_emulated_hasseb():
         assert lamps["lamp0"].level == 0
         assert lamps["lamp1"].level == 0
         assert device.gears[1]["level"] == 0
+        # The confirming queries agree with the command.
+        assert wait_for(lambda: not sync._expected)
 
         # A change the bus never showed (power cycle) is caught by polling.
         device.gears[1]["level"] = 254

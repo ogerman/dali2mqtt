@@ -14,6 +14,13 @@ and resumed once no query has been sent for ``SNIFF_RESUME_DELAY``. A burst
 of queries (a bus scan, a poll sweep) pays for the switch only once. The mode
 also survives a restart of dali2mqtt, so ``start`` always sets it explicitly.
 
+The firmware reports nothing for a frame that expects no answer, so
+python-dali sends those back to back, about 30 ms apart. A DALI frame plus
+the window in which an answer could follow takes longer than that, and the
+device loses frames sent that fast: a colour sequence (DTR writes, SET
+TEMPORARY ..., ACTIVATE) arrived incomplete and did nothing. Every frame
+without an answer is therefore followed by ``COMMAND_GAP``.
+
 Report layout, from the firmware README and the hasseb GUI::
 
     byte 1   0x07, DALI frame report
@@ -43,6 +50,10 @@ REPORT_LENGTH = 10
 READ_TIMEOUT_MS = 100
 RESPONSE_TIMEOUT = 2.0
 SNIFF_RESUME_DELAY = 0.2
+# Names of the answer statuses that carry no usable answer, for the log.
+ANSWER_STATUS = {1: "No answer", 4: "Answer too early"}
+# Pause after a frame that expects no answer, on top of python-dali's 20 ms.
+COMMAND_GAP = 0.04
 
 
 class SniffingHassebDriver(SyncHassebDALIUSBDriver):
@@ -107,9 +118,13 @@ class SniffingHassebDriver(SyncHassebDALIUSBDriver):
 
     # Sending
 
+    # Tests set this to 0; see COMMAND_GAP.
+    command_gap = COMMAND_GAP
+
     def send(self, command):
+        is_query = getattr(command, "is_query", False)
         with self._io_lock:
-            if getattr(command, "is_query", False):
+            if is_query:
                 if self._sniff_active:
                     self._set_sniffing(False)
                 self._last_query = time.monotonic()
@@ -117,8 +132,10 @@ class SniffingHassebDriver(SyncHassebDALIUSBDriver):
             try:
                 return super().send(command)
             finally:
-                if getattr(command, "is_query", False):
+                if is_query:
                     self._last_query = time.monotonic()
+                elif self.command_gap:
+                    time.sleep(self.command_gap)
 
     def _maybe_resume_sniffing(self):
         """Turn sniffing back on once the queries have stopped."""
@@ -194,6 +211,10 @@ class SniffingHassebDriver(SyncHassebDALIUSBDriver):
         if status in (HASSEB_DRIVER_OK, HASSEB_DRIVER_INVALID_ANSWER):
             self._response_message = data
         else:
+            logger.debug(
+                "%s to %s: %s",
+                ANSWER_STATUS.get(status, f"status {status}"), self._pending, data.hex(),
+            )
             self._response_message = None
         self._pending = None
         self._response_ready.set()
