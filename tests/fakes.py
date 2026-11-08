@@ -12,6 +12,8 @@ from dali.gear import colour as dt8
 
 MASK8 = 255
 MASK16 = 65535
+# Single byte colour values: RGBWAF levels and control, colour types.
+EIGHT_BIT = {v for v in range(9, 16)} | set(range(201, 209)) | set(range(233, 241))
 
 
 class FakeGear:
@@ -33,6 +35,8 @@ class FakeGear:
         primaries=0,
         rgbwaf_channels=0,
         auto_activation=False,
+        status_all_bits=False,
+        echo_byte=True,
     ):
         self.min_level = min_level
         self.max_level = max_level
@@ -51,6 +55,11 @@ class FakeGear:
         self.primaries = primaries
         self.rgbwaf_channels = rgbwaf_channels
         self.auto_activation = auto_activation
+        # Like the RGBW gear on the real bus: QUERY COLOUR STATUS has every
+        # supported type bit set, only the report colour type tells.
+        self.status_all_bits = status_all_bits
+        # office-rgb echoes single byte answers into DTR0, living-room-rgb leaves 0.
+        self.echo_byte = echo_byte
         self.dtr0 = 0
         self.dtr1 = 0
         self.dtr2 = 0
@@ -170,17 +179,28 @@ class FakeGear:
         if isinstance(command, dt8.QueryGearFeaturesStatus):
             return 1 if self.auto_activation else 0
         if isinstance(command, dt8.QueryColourStatus):
-            return {"xy": 0x10, "tc": 0x20, "rgbw": 0x80}.get(self.active, 0)
+            if self.status_all_bits:
+                return 0xF0
+            return self._colour_type()
         if isinstance(command, dt8.QueryColourValue):
-            value = self._colour_value(self.dtr0)
+            key = self.dtr0
+            value = self._colour_value(key)
             if value is None:
                 return None
+            if key in EIGHT_BIT:
+                self.dtr0 = value if self.echo_byte else 0
+                return value
             self.dtr0 = value & 0xFF
             return value >> 8
         return None
 
+    def _colour_type(self):
+        return {"xy": 0x10, "tc": 0x20, "rgbw": 0x80}.get(self.active, 0)
+
     def _colour_value(self, key):
         Q = dt8.QueryColourValueDTR
+        if key == Q.ReportColourType:
+            return self._colour_type() or MASK8
         if key == Q.ColourTemperatureTC:
             return MASK16 if self.active != "tc" else self.tc
         if key == Q.ColourTemperatureTcCoolest and self.tc_range:
@@ -198,6 +218,6 @@ class FakeGear:
         channels = (Q.RedDimLevel, Q.GreenDimLevel, Q.BlueDimLevel, Q.WhiteDimLevel)
         if key in channels:
             if self.active != "rgbw" or self.rgbw is None:
-                return MASK16
+                return MASK8
             return self.rgbw[channels.index(key)]
         return None

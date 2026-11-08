@@ -379,8 +379,7 @@ class Lamp:
         others keep their last known value. Returns True when anything changed.
         """
         if state is None or state.mode not in HA_COLOR_MODES:
-            # Modes Home Assistant isn't offered (xy, primary N) can't be shown,
-            # and living-room-rgb reports a stuck xy point whatever it shows.
+            # Modes Home Assistant isn't offered (xy, primary N) can't be shown.
             return False
         if (
             self.colour_mode == colour.COLOR_TEMP
@@ -436,6 +435,26 @@ class Lamp:
         self.seed_colour(
             previous.colour_mode, previous.colour_temp, previous.rgbw, previous._emulated_rgbw
         )
+
+    def recognise_colour_temp(self, mirek):
+        """Show RGBW levels the gear reports as the colour temperature they mix.
+
+        After a restart the gear reports the RGBW levels of a mixed colour
+        temperature; the retained colour temperature says which one. Returns
+        True when the levels match it.
+        """
+        if not (self.colour_temp_emulated and self.colour_mode == colour.RGBWAF):
+            return False
+        coolest, warmest = self.colour_temp_range
+        mirek = min(max(int(mirek), coolest), warmest)
+        levels = tuple(colour.ha_to_dim(v) for v in colour.colour_temp_to_rgbw(mirek))
+        if levels != self.__rgbw:
+            return False
+        self._emulated_rgbw = levels
+        self.colour_mode = colour.COLOR_TEMP
+        self.__colour_temp = mirek
+        logger.debug("Lamp <%s> shows mixed colour temperature %s", self.friendly_name, mirek)
+        return True
 
     def update_colour_temp(self, mirek):
         """Record a colour temperature observed on the bus. Returns True on change."""

@@ -7,7 +7,7 @@ import pytest
 from dali.address import Group, Short
 
 from dali2mqtt.bus import Bus
-from dali2mqtt.colour import COLOR_TEMP, RGBWAF
+from dali2mqtt.colour import COLOR_TEMP, RGBWAF, ha_to_dim
 from dali2mqtt.lamp import Lamp
 from tests.fakes import FakeGear
 
@@ -521,3 +521,54 @@ def test_rgbw_switches_off_leftover_amber_and_freecolour():
 
     assert (device.amber, device.free) == (0, 0)
     assert device.rgbw == (254, 0, 0, 127)  # 128 of 255 is dim level 127
+
+
+# Reading the colour the gear shows
+
+
+def test_boot_reads_rgbw_from_gear_with_every_status_bit_set():
+    """office-rgb: status 0xF0, report colour type RGBWAF, levels as single bytes."""
+    lamp, _ = make_rgbw_lamp(rgbw=(254, 251, 246, 3), status_all_bits=True)
+
+    assert lamp.colour_mode == RGBWAF
+    assert lamp.rgbw == (254, 251, 246, 3)
+
+
+def test_single_byte_levels_do_not_depend_on_dtr0():
+    """living-room-rgb answers the level and leaves DTR0 at 0."""
+    lamp, _ = make_rgbw_lamp(rgbw=(254, 0, 12, 206), status_all_bits=True, echo_byte=False)
+
+    assert lamp.rgbw == (254, 0, 12, 206)
+
+
+def test_ambiguous_status_without_report_type_gives_no_state():
+    from dali2mqtt.colour import query_colour_mode
+
+    _, device = make_rgbw_lamp(rgbw=(1, 2, 3, 4), status_all_bits=True)
+    device._colour_type = lambda: 0  # no usable report colour type
+
+    assert query_colour_mode(Bus(device), Short(3)) is None
+
+
+def test_poll_picks_up_a_colour_set_from_a_wall_panel():
+    from dali2mqtt.colour import read_colour_state
+
+    lamp, device = make_rgbw_lamp(rgbw=(254, 251, 246, 3), status_all_bits=True)
+    device.rgbw = (0, 254, 40, 100)  # the panel's frames were unreadable
+
+    assert lamp.update_colour(read_colour_state(lamp.driver, lamp.short_address))
+    assert lamp.rgbw == (0, 254, 40, 100)
+    assert lamp.rgbw_ha == "0,255,40,100"
+
+
+def test_reported_levels_of_a_mixed_colour_temperature_are_recognised():
+    from dali2mqtt.colour import colour_temp_to_rgbw
+
+    levels = tuple(ha_to_dim(v) for v in colour_temp_to_rgbw(157))
+    lamp, _ = make_rgbw_lamp(rgbw=levels, status_all_bits=True)
+    assert lamp.colour_mode == RGBWAF
+
+    assert not lamp.recognise_colour_temp(300)  # other levels
+    assert lamp.recognise_colour_temp(157)
+    assert lamp.ha_colour_mode == "color_temp"
+    assert lamp.colour_temp == 157

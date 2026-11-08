@@ -369,9 +369,20 @@ def on_message_colour_state(mqtt_client, data_object, msg):
         lamp_object = get_lamp_object(data_object, light)
     except KeyError:
         return
-    if lamp_object.colour is None or lamp_object.colour_mode is not None:
+    if lamp_object.colour is None:
         return
     payload = msg.payload.decode("utf-8", "replace").strip()
+    if lamp_object.colour_mode is not None:
+        # The gear reported its colour; a retained colour temperature can
+        # still say that the RGBW levels it reported mix that temperature.
+        if kind == "color_temp" and lamp_object._emulated_rgbw is None:
+            try:
+                mirek = int(float(payload))
+            except ValueError:
+                return
+            if lamp_object.recognise_colour_temp(mirek):
+                publish_colour_state(mqtt_client, data_object["base_topic"], lamp_object)
+        return
     try:
         if kind == "color_mode":
             mode = {name: mode for mode, name in HA_COLOR_MODES.items()}.get(payload)

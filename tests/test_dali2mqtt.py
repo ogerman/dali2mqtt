@@ -390,3 +390,26 @@ def test_rescan_recognises_a_mixed_colour_temperature_read_back_as_rgbw():
     new = rescan_after_colour_temp(gear_reports_back=True)
     assert new.ha_colour_mode == "color_temp"
     assert new.colour_temp == 300
+
+
+def test_retained_colour_temp_names_the_mixed_levels_the_gear_reports():
+    from dali2mqtt.bus import Bus
+    from dali2mqtt.colour import colour_temp_to_rgbw, ha_to_dim
+    from dali2mqtt.dali2mqtt import on_message_colour_state
+    from tests.fakes import FakeGear
+
+    levels = tuple(ha_to_dim(v) for v in colour_temp_to_rgbw(157))
+    device = FakeGear(device_types=(8,), rgbwaf_channels=4, min_level=8, level=74,
+                      rgbw=levels, status_all_bits=True)
+    bus = Bus(device)
+    lamp = Lamp("debug", bus, "office-rgb", Short(3))
+    data = {"driver": bus, "base_topic": "dali2mqtt", "all_lamps": {"office-rgb": lamp}}
+    client = mock.Mock()
+    assert lamp.ha_colour_mode == "rgbw"
+
+    on_message_colour_state(client, data, retained(
+        "dali2mqtt/office-rgb/light/color_temp/status", "157"))
+
+    assert lamp.ha_colour_mode == "color_temp"
+    client.publish.assert_any_call(
+        "dali2mqtt/office-rgb/light/color_mode/status", "color_temp", retain=True)

@@ -26,7 +26,7 @@ from dali.gear.colour import (
     SetTemporaryRGBWAFControl,
     SetTemporaryWAFDimLevel,
 )
-from dali.gear.general import DTR0, DTR1, DTR2, QueryContentDTR0
+from dali.gear.general import DTR0, DTR1, DTR2, QueryActualLevel, QueryContentDTR0
 from dali.sequences import QueryDeviceTypes
 
 logger = logging.getLogger(__name__)
@@ -75,6 +75,16 @@ _VALUE_KEYS = {
     RGBWAF: (Q.RedDimLevel, Q.GreenDimLevel, Q.BlueDimLevel, Q.WhiteDimLevel),
     XY: (Q.XCoordinate, Q.YCoordinate),
 }
+# "REPORT COLOUR TYPE" values (part 209, 9.12.6).
+_REPORT_TYPES = {0x10: XY, 0x20: COLOR_TEMP, 0x40: PRIMARY_N, 0x80: RGBWAF}
+# Colour values that are a single byte: RGBWAF dim levels and control, the
+# colour types. The gear answers them directly; on the real bus office-rgb
+# echoes the byte into both DTRs and living-room-rgb leaves DTR0 at 0, so
+# assembling them as 16 bit values gives nonsense.
+EIGHT_BIT_KEYS = frozenset(
+    key for key in Q
+    if 9 <= key.value <= 15 or 201 <= key.value <= 208 or 233 <= key.value <= 240
+)
 
 
 class ColourFeatures:
@@ -203,23 +213,34 @@ def query_colour_features(bus, address, attempts=3):
 
 
 def colour_values_sequence(address, keys):
-    """Sequence reading 16 bit colour values; returns {key: value or None}.
+    """Sequence reading colour values; returns {key: value or None}.
 
-    Each value takes three frames: DTR0 selects it, QUERY COLOUR VALUE answers
-    the MSB and leaves the LSB in DTR0. MASK and missing answers give None.
+    DTR0 selects the value and QUERY COLOUR VALUE answers it. For 16 bit
+    values the answer is the MSB and the LSB is left in DTR0; single byte
+    values (EIGHT_BIT_KEYS) are the answer itself. MASK and missing answers
+    give None.
     """
     result = {}
     for key in keys:
         yield DTR0(key.value)
-        msb = yield QueryColourValue(address)
+        answer = yield QueryColourValue(address)
+        high = _answer_byte(answer)
+        if key in EIGHT_BIT_KEYS:
+            result[key] = None if high is None or high == MASK8 else high
+            continue
         lsb = yield QueryContentDTR0(address)
-        value = None
-        high = getattr(msb, "value", None)
-        low = getattr(lsb, "value", None)
-        if isinstance(high, int) and isinstance(low, int):
-            value = (high << 8) | low
+        low = _answer_byte(lsb)
+        value = None if high is None or low is None else (high << 8) | low
         result[key] = None if value is None or value == MASK16 else value
     return result
+
+
+def _answer_byte(response):
+    """Return the byte a gear answered, or None for no or a garbled answer."""
+    raw = getattr(response, "raw_value", None)
+    if raw is None or getattr(raw, "error", False):
+        return None
+    return raw.as_integer
 
 
 def query_colour_values(bus, address, keys, attempts=2):
@@ -262,32 +283,46 @@ def query_colour_temp_range(bus, address):
 def plausible_xy(xy):
     """Return True for a real chromaticity: x, y > 0 and x + y <= 1.
 
-    Gear has been seen answering near-MASK garbage (x, y around 0.995).
+    RGBW gear answers near-MASK values (x, y around 0.995) when asked for
+    xy while another colour type is active.
     """
     x, y = xy
     return isinstance(x, int) and isinstance(y, int) and x > 0 and y > 0 and x + y <= 65536
+
+
+def query_colour_mode(bus, address):
+    """Return the gear's active colour type, or None when it can't be told.
+
+    QUERY ACTUAL LEVEL refreshes the report colour type, which says exactly
+    one type. QUERY COLOUR STATUS is the fallback, used only when it has a
+    single type bit set: the RGBW gear on the real bus sets three or four.
+    """
+    try:
+        bus.send(QueryActualLevel(address))
+        report = query_colour_values(bus, address, (Q.ReportColourType,)).get(Q.ReportColourType)
+        if report in _REPORT_TYPES:
+            return _REPORT_TYPES[report]
+        status = bus.send(QueryColourStatus(address))
+    except Exception as err:  # pylint: disable=broad-except
+        logger.debug("Can't read colour type of %s: %s", address, err)
+        return None
+    if getattr(status, "raw_value", None) is None:
+        return None
+    active = [name for attr, name in _ACTIVE_TYPE_BITS if getattr(status, attr, False)]
+    if len(active) != 1:
+        logger.debug("Colour status of %s names %s", address, active or "no type")
+        return None
+    return active[0]
 
 
 def read_colour_state(bus, address):
     """Return the gear's ColourState, or None when it can't be read.
 
     Only the active colour type's value is read; the others are MASK anyway.
-    A state is only returned when that value is readable and plausible: some
-    gear answers garbage, and a wrong reading would overwrite a colour that
-    was set correctly.
+    A state is only returned when that value is readable and plausible, so a
+    bad reading never overwrites a colour that was set correctly.
     """
-    try:
-        status = bus.send(QueryColourStatus(address))
-    except Exception as err:  # pylint: disable=broad-except
-        logger.debug("Can't read colour status of %s: %s", address, err)
-        return None
-    if getattr(status, "raw_value", None) is None:
-        return None
-    mode = None
-    for attr, name in _ACTIVE_TYPE_BITS:
-        if getattr(status, attr, False):
-            mode = name
-            break
+    mode = query_colour_mode(bus, address)
     keys = _VALUE_KEYS.get(mode)
     if not keys:
         logger.debug("%s colour type %s is not read", address, mode)
