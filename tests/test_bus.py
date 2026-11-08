@@ -98,3 +98,76 @@ def test_driver_may_pin_the_name_home_assistant_knows():
         driver_name = "SyncHassebDALIUSBDriver"
 
     assert Bus(Pinned()).driver_name == "SyncHassebDALIUSBDriver"
+
+
+def test_run_sequence_sends_each_command_and_returns_the_result():
+    driver = FakeDriver()
+    bus = Bus(driver)
+    listener = mock.Mock()
+    bus.add_listener(listener)
+
+    def sequence():
+        first = yield gear.DTR0(5)
+        second = yield gear.QueryActualLevel(Short(1))
+        return first, second
+
+    assert bus.run_sequence(sequence()) == ("response", "response")
+    assert [type(c).__name__ for c in driver.sent] == ["DTR0", "QueryActualLevel"]
+    listener.assert_called_once()  # DTR0 only, the query is not traffic
+
+
+def test_extended_commands_are_preceded_by_enable_device_type():
+    from dali.gear.colour import Activate
+
+    driver = FakeDriver()
+    bus = Bus(driver)
+    listener = mock.Mock()
+    bus.add_listener(listener)
+
+    bus.send(Activate(Short(1)))
+
+    assert [type(c).__name__ for c in driver.sent] == ["EnableDeviceType", "Activate"]
+    assert driver.sent[0].param == 8
+    listener.assert_called_once()
+
+
+def test_run_sequence_honours_sleep_and_progress():
+    from dali.sequences import progress, sleep
+
+    def sequence():
+        yield sleep(0.1)
+        yield progress(message="half way")
+        yield gear.Off(Short(1))
+        return "done"
+
+    with mock.patch("dali2mqtt.bus.time.sleep") as slept:
+        assert Bus(FakeDriver()).run_sequence(sequence()) == "done"
+    slept.assert_called_once_with(0.1)
+
+
+def test_other_senders_wait_for_a_running_sequence():
+    import threading
+    import time
+
+    driver = FakeDriver()
+    bus = Bus(driver)
+    started = threading.Event()
+    release = threading.Event()
+
+    def sequence():
+        yield gear.DTR0(1)
+        started.set()
+        release.wait(1)
+        yield gear.DTR1(2)
+
+    runner = threading.Thread(target=bus.run_sequence, args=(sequence(),))
+    runner.start()
+    assert started.wait(1)
+    other = threading.Thread(target=bus.send, args=(gear.Off(Short(1)),))
+    other.start()
+    time.sleep(0.05)
+    release.set()
+    runner.join(1)
+    other.join(1)
+
+    assert [type(c).__name__ for c in driver.sent] == ["DTR0", "DTR1", "Off"]

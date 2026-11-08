@@ -6,6 +6,9 @@ from collections import deque
 
 from dali.command import from_frame
 from dali.frame import ForwardFrame
+from dali.gear.general import EnableDeviceType
+from dali.sequences import progress as sequence_progress
+from dali.sequences import sleep as sequence_sleep
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +21,8 @@ class Bus:
 
     Every command goes through ``send`` under one lock, so the MQTT thread,
     the level poller and any other caller never interleave on the device.
+    ``run_sequence`` holds the lock for a whole python-dali sequence, since
+    sequences pass state between commands through the gear's DTR registers.
 
     Listeners registered with ``add_listener`` are called as
     ``listener(command, own)`` for every non-query command that went out on
@@ -36,8 +41,15 @@ class Bus:
         self._recent_own = deque(maxlen=16)  # (frame bytes, monotonic time)
 
     def send(self, command):
-        """Send a command to the bus and return the driver's response."""
+        """Send a command to the bus and return the driver's response.
+
+        Application extended commands (device type 8 colour control, ...) are
+        preceded by the ``EnableDeviceType`` frame the gear expects.
+        """
         with self._lock:
+            devicetype = getattr(command, "devicetype", 0)
+            if devicetype:
+                self.driver.send(EnableDeviceType(devicetype))
             response = self.driver.send(command)
         if not getattr(command, "is_query", False):
             try:
@@ -46,6 +58,31 @@ class Bus:
                 pass
             self._notify(command, True)
         return response
+
+    def run_sequence(self, seq):
+        """Run a python-dali command sequence and return its result.
+
+        The bus is held for the whole sequence, so no other thread can send
+        between its commands and disturb the DTR registers it relies on.
+        """
+        response = None
+        with self._lock:
+            try:
+                while True:
+                    try:
+                        cmd = seq.send(response)
+                    except StopIteration as done:
+                        return done.value
+                    if isinstance(cmd, sequence_sleep):
+                        time.sleep(cmd.delay)
+                        response = None
+                    elif isinstance(cmd, sequence_progress):
+                        logger.debug("%s", cmd)
+                        response = None
+                    else:
+                        response = self.send(cmd)
+            finally:
+                seq.close()
 
     def add_listener(self, listener):
         """Register ``listener(command, own)`` for bus traffic."""

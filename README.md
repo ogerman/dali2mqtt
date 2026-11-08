@@ -74,6 +74,16 @@ Example `devices.yaml`:
 ```
 Please note that MQTT topics support a minimum set of characters, therefore friendly names are converted to slug strings, so a lamp with address 0 (as an example) in MQTT will be named "lamp-in-kitchen"
 
+### Colour temperature
+Lamps that implement DALI colour control (IEC 62386-209, device type 8) with colour temperature support are detected at start-up and get a colour temperature slider in Home Assistant, limited to the range the lamp renders. Values are in mireds (DALI mirek):
+
+```
+dali2mqtt/<lamp>/light/color_temp/set     command, mireds
+dali2mqtt/<lamp>/light/color_temp/status  state, mireds
+```
+
+Groups get the slider when every member supports colour temperature, over the range they all share. RGB and xy colour control are not supported yet.
+
 ### Setup systemd
 edit dali2mqtt.service and change the path of python3 to the path of your venv, after:
 

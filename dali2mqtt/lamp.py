@@ -4,12 +4,15 @@ import logging
 
 import dali.address as address
 import dali.gear.general as gear
+from dali2mqtt import colour
 from dali2mqtt.consts import (
     ALL_SUPPORTED_LOG_LEVELS,
     LOG_FORMAT,
     MQTT_AVAILABLE,
     MQTT_BRIGHTNESS_COMMAND_TOPIC,
     MQTT_BRIGHTNESS_STATE_TOPIC,
+    MQTT_COLOR_TEMP_COMMAND_TOPIC,
+    MQTT_COLOR_TEMP_STATE_TOPIC,
     MQTT_COMMAND_TOPIC,
     MQTT_DALI2MQTT_STATUS,
     MQTT_NOT_AVAILABLE,
@@ -53,6 +56,13 @@ class Lamp:
         self.members = list(members or [])
         # Fade time in seconds, filled in by LevelSync; None while unknown.
         self.fade_time = None
+        # IEC 62386 part 2xx device types; 8 is colour control.
+        self.device_types = []
+        # colour.ColourFeatures for colour control gear, else None.
+        self.colour = None
+        # (coolest, warmest) colour temperature in mirek, None when unknown.
+        self.colour_temp_range = None
+        self.__colour_temp = None
 
         self.device_name = slugify(friendly_name)
 
@@ -62,6 +72,7 @@ class Lamp:
         if self.is_group:
             self.min_physical_level = None
             self.min_level, self.max_level = self._group_range(members)
+            self.colour, self.colour_temp_range = self._group_colour(members)
             # Set level directly without calling setter (which would send DAPC command)
             self.__level = 0  # Default to off, can't query actual level for groups
             logger.debug("Initialized group lamp %s with default values", friendly_name)
@@ -80,6 +91,21 @@ class Lamp:
             self.min_level = driver.send(gear.QueryMinLevel(short_address)).value
             self.max_level = driver.send(gear.QueryMaxLevel(short_address)).value
             self.level = driver.send(gear.QueryActualLevel(short_address)).value
+            self._query_colour()
+
+    def _query_colour(self):
+        """Find out whether the gear controls colour and what it supports."""
+        self.device_types = colour.query_device_types(self.driver, self.short_address)
+        if colour.DT8 not in self.device_types:
+            return
+        self.colour = colour.query_colour_features(self.driver, self.short_address)
+        if self.colour is None or colour.COLOR_TEMP not in self.colour.types:
+            return
+        self.colour_temp_range = colour.query_colour_temp_range(
+            self.driver, self.short_address
+        )
+        if self.colour_temp_range is not None:
+            self.__colour_temp = colour.query_colour_temp(self.driver, self.short_address)
 
     @staticmethod
     def _group_range(members):
@@ -96,10 +122,42 @@ class Lamp:
             return 1, 254  # Full DALI range
         return min(lo for lo, _ in levels), max(hi for _, hi in levels)
 
+    @staticmethod
+    def _group_colour(members):
+        """Return the colour features and Tc range shared by every member.
+
+        A group only offers what all its members can do, within the colour
+        temperature range they all render.
+        """
+        members = list(members or [])
+        if not members or any(m.colour is None for m in members):
+            return None, None
+        types = frozenset.intersection(*(m.colour.types for m in members))
+        features = colour.ColourFeatures(
+            types, auto_activation=all(m.colour.auto_activation for m in members)
+        )
+        ranges = [m.colour_temp_range for m in members]
+        if colour.COLOR_TEMP not in types or any(r is None for r in ranges):
+            return features, None
+        coolest = max(r[0] for r in ranges)
+        warmest = min(r[1] for r in ranges)
+        if coolest > warmest:
+            return features, None
+        return features, (coolest, warmest)
+
     @property
     def dimmable(self):
         """Return True if the lamp has more than one light level."""
         return self.max_level > self.min_level
+
+    @property
+    def has_colour_temp(self):
+        """Return True if the lamp's colour temperature can be set."""
+        return (
+            self.colour is not None
+            and colour.COLOR_TEMP in self.colour.types
+            and self.colour_temp_range is not None
+        )
 
     def level_to_ha(self, level):
         """Convert a DALI level to Home Assistant brightness (0 = off).
@@ -151,6 +209,21 @@ class Lamp:
                     "on_cmd_type": "brightness",
                 }
             )
+        if self.has_colour_temp:
+            # Home Assistant mireds are DALI mirek; coolest is the lower number.
+            coolest, warmest = self.colour_temp_range
+            json_config.update(
+                {
+                    "clr_temp_stat_t": MQTT_COLOR_TEMP_STATE_TOPIC.format(
+                        mqtt_base_topic, self.device_name
+                    ),
+                    "clr_temp_cmd_t": MQTT_COLOR_TEMP_COMMAND_TOPIC.format(
+                        mqtt_base_topic, self.device_name
+                    ),
+                    "min_mirs": coolest,
+                    "max_mirs": warmest,
+                }
+            )
         return json.dumps(json_config)
 
     def actual_level(self):
@@ -188,6 +261,43 @@ class Lamp:
             "Set lamp <%s> brightness level to %s", self.friendly_name, self.level
         )
 
+    @property
+    def colour_temp(self):
+        """Return the colour temperature in mirek, None while unknown."""
+        return self.__colour_temp
+
+    def update_colour_temp(self, mirek):
+        """Record a colour temperature observed on the bus without sending anything.
+
+        Returns True when it changed.
+        """
+        if mirek == self.__colour_temp:
+            return False
+        self.__colour_temp = mirek
+        logger.debug("Lamp <%s> colour temperature is now %s", self.friendly_name, mirek)
+        return True
+
+    def set_colour_temp(self, mirek):
+        """Commit a colour temperature (mirek) to the ballast.
+
+        The value is clamped to the range the gear renders; the value actually
+        set is returned.
+        """
+        if not self.has_colour_temp:
+            raise ValueError(f"{self.friendly_name} has no colour temperature control")
+        coolest, warmest = self.colour_temp_range
+        mirek = min(max(int(mirek), coolest), warmest)
+        colour.set_colour_temp(self.driver, self.short_address, mirek)
+        self.__colour_temp = mirek
+        for member in self.members:
+            if member.has_colour_temp:
+                lo, hi = member.colour_temp_range
+                member.update_colour_temp(min(max(mirek, lo), hi))
+        logger.debug(
+            "Set lamp <%s> colour temperature to %s mirek", self.friendly_name, mirek
+        )
+        return mirek
+
     def off(self):
         """Turn off ballast."""
         self.driver.send(gear.Off(self.short_address))
@@ -199,8 +309,14 @@ class Lamp:
             addr_str = str(self.short_address)
         else:
             addr_str = str(self.short_address.address)
-        return (
+        text = (
             f"{self.device_name} - address: {addr_str}, "
             f"actual brightness level: {self.level} (minimum: {self.min_level}, "
             f"max: {self.max_level}, physical minimum: {self.min_physical_level})"
         )
+        if self.colour is not None:
+            text += f", colour: {self.colour}"
+        if self.has_colour_temp:
+            coolest, warmest = self.colour_temp_range
+            text += f", colour temperature: {self.colour_temp} ({coolest}..{warmest} mirek)"
+        return text

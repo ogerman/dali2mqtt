@@ -105,3 +105,55 @@ def test_commands_on_home_assistant_topic_names():
     (cmd,), _ = data["driver"].send.call_args
     assert type(cmd).__name__ == "Off"
     client.publish.assert_called_with("dali2mqtt/group-1/light/status", b"OFF", retain=True)
+
+
+def make_colour_data_object():
+    from dali2mqtt.bus import Bus
+    from tests.fakes import FakeGear
+
+    device = FakeGear(device_types=(8,), tc_range=(153, 370), tc=250)
+    bus = Bus(device)
+    lamp = Lamp("debug", bus, "office", Short(3))
+    del device.sent[:]
+    return {"driver": bus, "base_topic": "dali2mqtt", "all_lamps": {"office": lamp}}, device
+
+
+def test_colour_temp_command_sets_the_gear_and_publishes_state():
+    from dali2mqtt.dali2mqtt import on_message_color_temp_cmd
+
+    data, device = make_colour_data_object()
+    client = mock.Mock()
+    msg = mock.Mock(topic="dali2mqtt/office/light/color_temp/set", payload=b"300")
+
+    on_message_color_temp_cmd(client, data, msg)
+
+    assert device.tc == 300
+    client.publish.assert_called_once_with(
+        "dali2mqtt/office/light/color_temp/status", 300, retain=True
+    )
+
+
+def test_colour_temp_command_on_plain_lamp_sends_nothing():
+    from dali2mqtt.dali2mqtt import on_message_color_temp_cmd
+
+    data = make_data_object()
+    client = mock.Mock()
+    msg = mock.Mock(topic="dali2mqtt/kitchen/light/color_temp/set", payload=b"300")
+
+    on_message_color_temp_cmd(client, data, msg)
+
+    data["driver"].send.assert_not_called()
+    client.publish.assert_not_called()
+
+
+def test_lamp_state_includes_colour_temp():
+    from dali2mqtt.dali2mqtt import publish_lamp_state
+
+    data, _ = make_colour_data_object()
+    client = mock.Mock()
+
+    publish_lamp_state(client, "dali2mqtt", data["all_lamps"]["office"])
+
+    client.publish.assert_any_call(
+        "dali2mqtt/office/light/color_temp/status", 250, retain=True
+    )

@@ -53,6 +53,8 @@ from dali2mqtt.consts import (
     MQTT_BRIGHTNESS_MIN_LEVEL_TOPIC,
     MQTT_BRIGHTNESS_PHYSICAL_MINIMUM_LEVEL_TOPIC,
     MQTT_BRIGHTNESS_STATE_TOPIC,
+    MQTT_COLOR_TEMP_COMMAND_TOPIC,
+    MQTT_COLOR_TEMP_STATE_TOPIC,
     MQTT_COMMAND_TOPIC,
     MQTT_DALI2MQTT_STATUS,
     MQTT_NOT_AVAILABLE,
@@ -204,6 +206,14 @@ def initialize_lamps(data_object, client):
             ]
             for topic, payload, retain in mqtt_data:
                 client.publish(topic, payload, retain)
+            if lamp_object.has_colour_temp and lamp_object.colour_temp is not None:
+                client.publish(
+                    MQTT_COLOR_TEMP_STATE_TOPIC.format(
+                        mqtt_base_topic, lamp_object.device_name
+                    ),
+                    lamp_object.colour_temp,
+                    False,
+                )
 
             logger.info(lamp_object)
             return lamp_object
@@ -240,7 +250,7 @@ def initialize_lamps(data_object, client):
 
 
 def publish_lamp_state(mqtt_client, mqtt_base_topic, lamp):
-    """Publish a lamp's current on/off state and brightness."""
+    """Publish a lamp's current on/off state, brightness and colour."""
     mqtt_client.publish(
         MQTT_STATE_TOPIC.format(mqtt_base_topic, lamp.device_name),
         MQTT_PAYLOAD_ON if lamp.level > 0 else MQTT_PAYLOAD_OFF,
@@ -251,6 +261,12 @@ def publish_lamp_state(mqtt_client, mqtt_base_topic, lamp):
         lamp.level_to_ha(lamp.level),
         retain=True,
     )
+    if lamp.has_colour_temp and lamp.colour_temp is not None:
+        mqtt_client.publish(
+            MQTT_COLOR_TEMP_STATE_TOPIC.format(mqtt_base_topic, lamp.device_name),
+            lamp.colour_temp,
+            retain=True,
+        )
 
 
 def on_detect_changes_in_config(mqtt_client):
@@ -364,6 +380,35 @@ def on_message_brightness_cmd(mqtt_client, data_object, msg):
         logger.error("Lamp %s doesn't exists", light)
 
 
+def on_message_color_temp_cmd(mqtt_client, data_object, msg):
+    """Callback on MQTT colour temperature command message (mireds)."""
+    logger.debug("Color temperature Command on %s: %s", msg.topic, msg.payload)
+    light = re.search(
+        MQTT_COLOR_TEMP_COMMAND_TOPIC.format(data_object["base_topic"], "(.+?)"),
+        msg.topic,
+    ).group(1)
+    try:
+        lamp_object = get_lamp_object(data_object, light)
+    except KeyError:
+        logger.error("Lamp %s doesn't exists", light)
+        return
+    payload = msg.payload.decode("utf-8", "replace")
+    try:
+        mirek = lamp_object.set_colour_temp(int(float(payload)))
+    except ValueError as err:
+        logger.error("Can't set colour temperature of <%s> to <%s>: %s", light, payload, err)
+        return
+    except DALIError as err:
+        logger.error("Failed to set colour temperature of <%s>: %s", light, err)
+        return
+    logger.debug("Set light <%s> colour temperature to %s mirek", light, mirek)
+    mqtt_client.publish(
+        MQTT_COLOR_TEMP_STATE_TOPIC.format(data_object["base_topic"], light),
+        mirek,
+        retain=True,
+    )
+
+
 def on_message_brightness_get_cmd(mqtt_client, data_object, msg):
     """Callback on MQTT brightness get command message."""
     logger.debug("Brightness Get Command on %s: %s", msg.topic, msg.payload)
@@ -425,6 +470,7 @@ def on_connect(
             (MQTT_COMMAND_TOPIC.format(mqtt_base_topic, "+"), 0),
             (MQTT_BRIGHTNESS_COMMAND_TOPIC.format(mqtt_base_topic, "+"), 0),
             (MQTT_BRIGHTNESS_GET_COMMAND_TOPIC.format(mqtt_base_topic, "+"), 0),
+            (MQTT_COLOR_TEMP_COMMAND_TOPIC.format(mqtt_base_topic, "+"), 0),
             (MQTT_SCAN_LAMPS_COMMAND_TOPIC.format(mqtt_base_topic), 0),
             (HA_STATUS_TOPIC.format(ha_prefix), 0),
         ]
@@ -479,6 +525,10 @@ def create_mqtt_client(
     mqttc.message_callback_add(
         MQTT_BRIGHTNESS_GET_COMMAND_TOPIC.format(mqtt_base_topic, "+"),
         on_message_brightness_get_cmd,
+    )
+    mqttc.message_callback_add(
+        MQTT_COLOR_TEMP_COMMAND_TOPIC.format(mqtt_base_topic, "+"),
+        on_message_color_temp_cmd,
     )
     mqttc.message_callback_add(
         MQTT_SCAN_LAMPS_COMMAND_TOPIC.format(mqtt_base_topic),
