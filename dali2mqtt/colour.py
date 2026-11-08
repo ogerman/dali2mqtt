@@ -12,6 +12,7 @@ temperature is in mirek, the unit Home Assistant calls mireds. RGBWAF dim
 levels are single bytes, 0..254, with 255 as MASK.
 """
 import logging
+import math
 
 from dali.gear.colour import (
     Activate,
@@ -48,6 +49,8 @@ TC_MAX = 65534
 TC_SANE = (40, 1250)
 # Used when the gear reports no usable limits; Home Assistant's own default.
 TC_DEFAULT_RANGE = (153, 370)
+# Range of the colour temperature mixed from RGBW channels: 6500 K .. 2000 K.
+TC_EMULATED_RANGE = (153, 500)
 # RGBWAF dim levels are arc power levels, 0..254.
 DIM_MAX = 254
 HA_MAX = 255
@@ -108,6 +111,42 @@ class ColourState:
 
     def __repr__(self):
         return f"ColourState({vars(self)})"
+
+
+def kelvin_to_rgb(kelvin):
+    """Return the (r, g, b) of a black body at ``kelvin``, 0..255 each.
+
+    Tanner Helland's fit, the one Home Assistant uses too; good from 1000 K
+    to 40000 K.
+    """
+    t = min(max(kelvin, 1000), 40000) / 100
+    if t <= 66:
+        red = 255
+        green = 99.4708025861 * math.log(t) - 161.1195681661
+        blue = 0 if t <= 19 else 138.5177312231 * math.log(t - 10) - 305.0447927307
+    else:
+        red = 329.698727446 * (t - 60) ** -0.1332047592
+        green = 288.1221695283 * (t - 60) ** -0.0755148492
+        blue = 255
+    return tuple(round(min(max(c, 0), 255)) for c in (red, green, blue))
+
+
+def colour_temp_to_rgbw(mirek):
+    """Return Home Assistant RGBW values (0..255) that render ``mirek``.
+
+    For RGBW gear whose own colour temperature mode doesn't work: on the
+    real bus office-rgb and living-room-rgb render every Tc as the same
+    warm white. The RGB channels make the black body colour; their W
+    channel is a warm white LED (about 3000 K), so it is blended in fully
+    at the warm end and faded out towards 6500 K, where it would tint the
+    white.
+    """
+    coolest, warmest = TC_EMULATED_RANGE
+    mirek = min(max(int(mirek), coolest), warmest)
+    red, green, blue = kelvin_to_rgb(1_000_000 / mirek)
+    warmth = (mirek - coolest) / (warmest - coolest)  # 0 at 6500 K, 1 at 2000 K
+    white = round(255 * warmth)
+    return red, green, blue, white
 
 
 def ha_to_dim(value):

@@ -73,6 +73,8 @@ class Lamp:
         self.colour_mode = None
         self.__colour_temp = None  # mirek
         self.__rgbw = None  # (red, green, blue, white) dim levels 0..254
+        # RGBW levels last sent to render a colour temperature, see colour_temp_emulated.
+        self._emulated_rgbw = None
 
         self.device_name = slugify(friendly_name)
 
@@ -126,7 +128,9 @@ class Lamp:
         self.colour = colour.query_colour_features(self.driver, self.short_address)
         if self.colour is None:
             return
-        if colour.COLOR_TEMP in self.colour.types:
+        if self.colour_temp_emulated:
+            self.colour_temp_range = colour.TC_EMULATED_RANGE
+        elif colour.COLOR_TEMP in self.colour.types:
             self.colour_temp_range = colour.query_colour_temp_range(
                 self.driver, self.short_address
             )
@@ -174,6 +178,8 @@ class Lamp:
             rgbwaf_channels=min(m.colour.rgbwaf_channels for m in members),
             auto_activation=all(m.colour.auto_activation for m in members),
         )
+        if colour.RGBWAF in features.types and features.rgbwaf_channels >= 4:
+            return features, colour.TC_EMULATED_RANGE
         ranges = [m.colour_temp_range for m in members]
         if colour.COLOR_TEMP not in features.types or any(r is None for r in ranges):
             return features, None
@@ -193,9 +199,18 @@ class Lamp:
         """Return True if the lamp's colour temperature can be set."""
         return (
             self.colour is not None
-            and colour.COLOR_TEMP in self.colour.types
+            and (colour.COLOR_TEMP in self.colour.types or self.colour_temp_emulated)
             and self.colour_temp_range is not None
         )
+
+    @property
+    def colour_temp_emulated(self):
+        """Return True when colour temperature is mixed from the RGBW channels.
+
+        Done for all RGBW gear: the RGBW gear on the real bus claims colour
+        temperature support but renders every value as one warm white.
+        """
+        return self.has_rgbw
 
     @property
     def has_rgbw(self):
@@ -365,6 +380,13 @@ class Lamp:
         """
         if state is None or state.mode is None:
             return False
+        if (
+            self.colour_mode == colour.COLOR_TEMP
+            and state.mode == colour.RGBWAF
+            and state.rgbw is not None
+            and state.rgbw == self._emulated_rgbw
+        ):
+            return False  # the RGBW levels of an emulated colour temperature
         changed = state.mode != self.colour_mode
         self.colour_mode = state.mode
         if state.mode == colour.COLOR_TEMP and state.colour_temp is not None:
@@ -419,13 +441,24 @@ class Lamp:
             raise ValueError(f"{self.friendly_name} has no colour temperature control")
         coolest, warmest = self.colour_temp_range
         mirek = min(max(int(mirek), coolest), warmest)
-        self._apply_colour(
-            lambda: colour.set_colour_temp(self.driver, self.short_address, mirek)
-        )
+        if self.colour_temp_emulated:
+            values = colour.colour_temp_to_rgbw(mirek)
+            levels = self._apply_colour(
+                lambda: colour.set_rgbw(
+                    self.driver, self.short_address, [colour.ha_to_dim(v) for v in values]
+                )
+            )
+        else:
+            levels = None
+            self._apply_colour(
+                lambda: colour.set_colour_temp(self.driver, self.short_address, mirek)
+            )
+        self._emulated_rgbw = levels
         self.update_colour_temp(mirek)
         for member in self.members:
             if member.has_colour_temp:
                 lo, hi = member.colour_temp_range
+                member._emulated_rgbw = levels if member.colour_temp_emulated else None
                 member.update_colour_temp(min(max(mirek, lo), hi))
         logger.debug(
             "Set lamp <%s> colour temperature to %s mirek", self.friendly_name, mirek
@@ -475,7 +508,8 @@ class Lamp:
             text += f", colour: {self.colour}"
         if self.has_colour_temp:
             coolest, warmest = self.colour_temp_range
-            text += f", colour temperature: {self.colour_temp} ({coolest}..{warmest} mirek)"
+            text += f", colour temperature: {self.colour_temp} ({coolest}..{warmest} mirek"
+            text += ", mixed from RGBW)" if self.colour_temp_emulated else ")"
         if self.has_rgbw:
             text += f", RGBW: {self.rgbw}"
         if self.colour_mode is not None:

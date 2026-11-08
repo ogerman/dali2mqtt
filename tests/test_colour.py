@@ -234,9 +234,9 @@ def test_colour_temp_after_rgbw_switches_mode_back():
 
     lamp.set_colour_temp(200)
 
-    assert device.active == "tc"
     assert lamp.ha_colour_mode == "color_temp"
-    assert lamp.rgbw == (254, 0, 0, 0)
+    assert lamp.colour_temp == 200
+    assert lamp.rgbw == (254, 0, 0, 0)  # the last colour chosen, kept for the picker
 
 
 def test_rgbw_needs_four_values():
@@ -404,3 +404,88 @@ def test_colour_detection_survives_lost_answers():
 
     assert lamp.device_types == [8]
     assert lamp.has_rgbw
+
+
+# Colour temperature mixed from RGBW
+
+
+def test_black_body_colours():
+    from dali2mqtt.colour import kelvin_to_rgb
+
+    assert all(c >= 250 for c in kelvin_to_rgb(6600))  # about white
+    warm, cool = kelvin_to_rgb(2700), kelvin_to_rgb(6500)
+    assert warm[0] == 255 and warm[2] < warm[1] < 255
+    assert cool[2] > warm[2] and cool[1] > warm[1]
+
+
+def test_mixed_white_gets_cooler_and_less_w_towards_6500k():
+    from dali2mqtt.colour import colour_temp_to_rgbw
+
+    warmest = colour_temp_to_rgbw(500)
+    middle = colour_temp_to_rgbw(250)
+    coolest = colour_temp_to_rgbw(153)
+    assert warmest[3] == 255 and coolest[3] == 0
+    assert warmest[3] > middle[3] > coolest[3]
+    assert warmest[2] < middle[2] < coolest[2]  # blue rises
+    assert colour_temp_to_rgbw(1000) == warmest  # clamped to the range
+
+
+def test_rgbw_gear_mixes_colour_temperature_from_its_channels():
+    """office-rgb and living-room-rgb render every native Tc as one warm white."""
+    from dali2mqtt.colour import colour_temp_to_rgbw, ha_to_dim
+
+    lamp, device = make_rgbw_lamp(tc_range=(153, 370), rgbw=(254, 0, 0, 0), level=100)
+    assert lamp.colour_temp_emulated
+    config = json.loads(lamp.gen_ha_config("t"))
+    assert (config["min_mirs"], config["max_mirs"]) == (153, 500)
+    mark = len(device.sent)
+
+    lamp.set_colour_temp(400)
+
+    names = [type(c).__name__ for c in device.sent[mark:]]
+    assert "SetTemporaryColourTemperature" not in names
+    assert "SetTemporaryRGBDimLevel" in names and "Activate" in names
+    assert device.rgbw == tuple(ha_to_dim(v) for v in colour_temp_to_rgbw(400))
+    assert device.level == 100
+    assert lamp.ha_colour_mode == "color_temp"
+    assert "mixed from RGBW" in str(lamp)
+
+
+def test_tunable_white_gear_keeps_its_own_colour_temperature():
+    lamp, device = make_lamp(device_types=(8,), tc_range=(153, 370), tc=250)
+    assert not lamp.colour_temp_emulated
+
+    lamp.set_colour_temp(300)
+
+    assert any(type(c).__name__ == "SetTemporaryColourTemperature" for c in device.sent)
+    assert device.tc == 300
+
+
+def test_readback_of_the_mixed_levels_keeps_colour_temp_mode():
+    from dali2mqtt.colour import read_colour_state
+
+    lamp, device = make_rgbw_lamp(rgbw=(0, 0, 0, 0))
+    lamp.set_colour_temp(250)
+    assert device.active == "rgbw"  # what a well-behaved gear reports back
+
+    assert not lamp.update_colour(read_colour_state(lamp.driver, lamp.short_address))
+    assert lamp.ha_colour_mode == "color_temp"
+    assert lamp.colour_temp == 250
+
+    device.rgbw = (254, 0, 0, 0)  # someone else picked red
+    assert lamp.update_colour(read_colour_state(lamp.driver, lamp.short_address))
+    assert lamp.ha_colour_mode == "rgbw"
+
+
+def test_group_of_rgbw_lamps_mixes_colour_temperature():
+    a, _ = make_rgbw_lamp("a", 1)
+    b, _ = make_rgbw_lamp("b", 2)
+    device = FakeGear(device_types=(8,), rgbwaf_channels=4)
+    group = Lamp("debug", Bus(device), "group_1", Group(1), [a, b])
+
+    assert group.colour_temp_range == (153, 500)
+    group.set_colour_temp(300)
+
+    assert not any(type(c).__name__ == "SetTemporaryColourTemperature" for c in device.sent)
+    assert a.colour_temp == b.colour_temp == 300
+    assert a.ha_colour_mode == "color_temp"

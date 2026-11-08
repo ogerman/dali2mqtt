@@ -79,7 +79,8 @@ Lamps that implement DALI colour control (IEC 62386-209, device type 8) are dete
 
 - colour temperature capable gear gets a colour temperature slider, limited to the range the lamp renders. Values are in mireds (DALI mirek);
 - gear with red, green, blue and white channels gets an RGBW colour picker; brightness dims the colour as a whole;
-- gear with both switches between the two, and the active colour mode is published.
+- on RGBW gear the colour temperature (2000 K to 6500 K) is mixed from the red, green, blue and white channels: RGBW gear tested so far claims its own colour temperature support but renders every value as the same white. Gear with colour temperature and no RGBW channels uses its own;
+- the active colour mode is published.
 
 ```
 dali2mqtt/<lamp>/light/color_temp/set      command, mireds
