@@ -148,9 +148,11 @@ def set_rgb_gains(gains):
     """Set the red, green, blue factors for mixed colour temperatures.
 
     LED strips differ in how strong their red, green and blue LEDs are, so the
-    textbook black body mix rarely looks right. On the nf RGBW strips equal
-    channels came out minty: matching an RGB mix to the strip's own warm white
-    LED on camera gave factors of about 1.0, 0.90 and 0.49.
+    textbook black body mix rarely looks right. On the nf RGBW strips (Arlight
+    RT-B60-10mm RGBW-Warm on MiBoxer DL-X drivers) equal channels came out
+    minty: matching an RGB mix to the strip's own 2700 K white LED on camera
+    gave factors of about 1.0, 0.96 and 0.62, and the 4000 K mix then also
+    matched the room's 4000 K ceiling lights.
     """
     global _rgb_gains  # pylint: disable=global-statement
     gains = tuple(float(g) for g in gains)

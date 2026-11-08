@@ -589,12 +589,12 @@ def test_gains_correct_the_mixed_white(gains):
     from dali2mqtt.colour import colour_temp_to_rgbw
 
     plain = colour_temp_to_rgbw(333)  # 3000 K
-    gains((1.0, 0.90, 0.49))  # measured on the nf strips
+    gains((1.0, 0.96, 0.62))  # measured on the nf strips
     corrected = colour_temp_to_rgbw(333)
 
     assert corrected[0] == 255
-    assert corrected[1] == round(plain[1] * 0.90)
-    assert abs(corrected[2] - plain[2] * 0.49) <= 1
+    assert abs(corrected[1] - plain[1] * 0.96) <= 1
+    assert abs(corrected[2] - plain[2] * 0.62) <= 1
     assert corrected[3] == plain[3]  # the W channel is not touched
 
 
