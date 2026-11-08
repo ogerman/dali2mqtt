@@ -75,22 +75,22 @@ Example `devices.yaml`:
 Please note that MQTT topics support a minimum set of characters, therefore friendly names are converted to slug strings, so a lamp with address 0 (as an example) in MQTT will be named "lamp-in-kitchen"
 
 ### Per-lamp settings
-Next to `friendly_name`, `devices.yaml` can describe what dali2mqtt can't read from the bus. Everything is optional; invalid settings are logged and ignored for that lamp.
+Next to `friendly_name`, `devices.yaml` can hold settings that change how a lamp is driven and can't be read from the bus. Everything is optional; invalid or misspelt settings are logged and ignored for that lamp.
 
 ```yaml
 3:
   friendly_name: office-rgb
-  model: MiBoxer DL-X                         # shown as an entity attribute
-  strip: Arlight RT-B60-10mm 24V RGBW-Warm    # shown as an entity attribute
   colour:
-    white_kelvin: 2700             # colour temperature of the strip's white LED
-    rgb_gains: [1.0, 0.96, 0.62]   # red, green, blue white balance of the strip
-    colour_temp: mixed             # mixed, native or off (default: automatic)
+    white_kelvin: 2400                # what the strip's white LED really shows
+    rgb_gains: [0.954, 1.0, 0.877]    # red, green, blue white balance at 2700 K
+    rgb_gains_cool: [1.0, 0.96, 0.62] # ... and at 6500 K
+    colour_temp: mixed                # mixed, native or off (default: automatic)
     colour_temp_range: [2000, 6500]
 ```
 
-- `white_kelvin`: the white channel is used fully from this colour temperature down to the warm end of the range and fades out towards the cool end.
-- `rgb_gains`: overrides the global `colour_temp_rgb_gains` for this lamp, see below.
+- `white_kelvin`: the white channel is used fully from this colour temperature down to the warm end of the range and fades out towards the cool end. Measure it rather than trusting the label: the "2700 K" white of the strip above matches an RGB mix of about 2400 K.
+- `rgb_gains`: the strip's white balance at 2700 K, overriding the global `colour_temp_rgb_gains`. Find it by matching an RGB-only mix to a lamp you trust at 2700 K; the factors are that mix divided by the textbook 2700 K colour (255, 167, 87).
+- `rgb_gains_cool`: the white balance at 6500 K, blended with `rgb_gains` in between. Strips rarely fit one set of factors at both ends; without it `rgb_gains` is used throughout.
 - `colour_temp`: `mixed` mixes colour temperature from the RGBW channels (the default for RGBW gear), `native` uses the gear's own (for instance a MiBoxer DL-X in RGB+CCT mode, with separate cold and warm white strips), `off` hides the colour temperature control.
 - `colour_temp_range`: warmest and coolest kelvin offered; for native colour temperature it narrows the range the gear reports.
 
@@ -112,7 +112,7 @@ dali2mqtt/<lamp>/light/rgbw/status         state, "r,g,b,w"
 dali2mqtt/<lamp>/light/color_mode/status   state, color_temp or rgbw
 ```
 
-LED strips differ in how strong their red, green and blue LEDs are, so the mixed colour temperature can look tinted, minty for instance. `colour_temp_rgb_gains` in `config.yaml` corrects it with a factor per channel, red, green, blue (default `[1.0, 1.0, 1.0]`). To find them, set the lamp to its white channel only and adjust an RGB-only mix until it looks the same; the factors are the ratios of that mix to the black body colour of the white LED's colour temperature from the strip's datasheet (255, 167, 87 for 2700 K, 255, 177, 110 for 3000 K). An Arlight RT-B60-10mm 24V RGBW-Warm strip (2700 K white) on a MiBoxer DL-X driver uses `[1.0, 0.96, 0.62]`.
+LED strips differ in how strong their red, green and blue LEDs are, so the mixed colour temperature can look tinted, minty for instance. `colour_temp_rgb_gains` in `config.yaml` corrects it with a factor per channel, red, green, blue (default `[1.0, 1.0, 1.0]`). Per-lamp `rgb_gains` and `rgb_gains_cool` in `devices.yaml` (see above) take precedence and are the better place for them.
 
 Colour changes made by other masters on the bus are picked up like level changes: sniffed on hasseb, and on every driver by the periodic poll. Groups get colour when every member supports it, over the colour temperature range they all share. xy and primary N colour control are not exposed.
 

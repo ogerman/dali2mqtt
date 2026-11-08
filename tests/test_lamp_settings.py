@@ -12,11 +12,14 @@ from dali2mqtt.devicesnamesconfig import DevicesNamesConfig
 from dali2mqtt.lamp import Lamp
 from tests.fakes import FakeGear
 
+# Arlight RT-B60-10mm 24V RGBW-Warm on MiBoxer DL-X, calibrated on camera.
 NF_RGB = {
     "friendly_name": "office-rgb",
-    "model": "MiBoxer DL-X",
-    "strip": "Arlight RT-B60-10mm 24V RGBW-Warm",
-    "colour": {"white_kelvin": 2700, "rgb_gains": [1.0, 0.96, 0.62]},
+    "colour": {
+        "white_kelvin": 2400,
+        "rgb_gains": [0.954, 1.0, 0.877],
+        "rgb_gains_cool": [1.0, 0.85, 0.85],
+    },
 }
 
 
@@ -42,7 +45,6 @@ def test_settings_are_read_next_to_the_friendly_name(tmp_path):
     names = devices_file(tmp_path, """
 3:
   friendly_name: office-rgb
-  model: MiBoxer DL-X
   colour:
     white_kelvin: 2700
     rgb_gains: [1, 0.96, 0.62]
@@ -52,7 +54,6 @@ def test_settings_are_read_next_to_the_friendly_name(tmp_path):
   friendly_name: kitchen
 """)
     settings = names.get_lamp_settings(3)
-    assert settings["model"] == "MiBoxer DL-X"
     assert settings["colour"]["rgb_gains"] == [1.0, 0.96, 0.62]
     assert names.get_friendly_name(3) == "office-rgb"
     assert names.get_lamp_settings(4) == {"friendly_name": "kitchen"}
@@ -65,6 +66,8 @@ def test_settings_are_read_next_to_the_friendly_name(tmp_path):
     "colour_temp: sometimes",
     "colour_temp_range: [6500, 2200]",
     "white_kelvin: 50",
+    "rgb_gains_cool: [1, 1]",
+    "brightness_boost: 3",
 ])
 def test_invalid_settings_are_ignored_not_fatal(tmp_path, caplog, colour):
     names = devices_file(tmp_path, f"3:\n  friendly_name: x\n  colour:\n    {colour}\n")
@@ -103,10 +106,10 @@ def test_lamp_mixes_with_its_own_settings():
 
     lamp.set_colour_temp(250)
 
-    expected = colour_temp_to_rgbw(250, ColourMix.build([1.0, 0.96, 0.62], 2700))
+    expected = colour_temp_to_rgbw(
+        250, ColourMix.build([0.954, 1.0, 0.877], 2400, None, [1.0, 0.85, 0.85])
+    )
     assert device.rgbw == tuple(ha_to_dim(v) for v in expected)
-    assert lamp.model == "MiBoxer DL-X"
-    assert "model: MiBoxer DL-X" in str(lamp)
 
 
 def test_configured_range_reaches_home_assistant():
@@ -167,11 +170,11 @@ def test_attributes_describe_the_lamp():
 
     attributes = lamp.ha_attributes()
     assert attributes["dali_address"] == 3
-    assert attributes["model"] == "MiBoxer DL-X"
-    assert attributes["strip"] == "Arlight RT-B60-10mm 24V RGBW-Warm"
+    assert "model" not in attributes
     assert attributes["colour_temp"] == "mixed"
-    assert attributes["white_kelvin"] == 2700
-    assert attributes["rgb_gains"] == [1.0, 0.96, 0.62]
+    assert attributes["white_kelvin"] == 2400
+    assert attributes["rgb_gains"] == [0.954, 1.0, 0.877]
+    assert attributes["rgb_gains_cool"] == [1.0, 0.85, 0.85]
     assert json.loads(lamp.gen_ha_config("t"))["json_attr_t"] == "t/lamp/light/attributes"
 
 
@@ -192,8 +195,25 @@ def test_start_up_passes_settings_and_publishes_attributes():
         initialize_lamps(data, client)
 
     names.get_lamp_settings.assert_called_with(3)
-    assert data["all_lamps"]["office-rgb"].model == "MiBoxer DL-X"
+    assert data["all_lamps"]["office-rgb"].mix.white_kelvin == 2400
     published = {c.args[0]: c for c in client.publish.call_args_list}
     attrs = published["dali2mqtt/office-rgb/light/attributes"]
-    assert json.loads(attrs.args[1])["model"] == "MiBoxer DL-X"
+    assert json.loads(attrs.args[1])["white_kelvin"] == 2400
     assert attrs.kwargs["retain"] is True
+
+
+def test_gains_move_from_the_warm_to_the_cool_set():
+    mix = ColourMix.build([0.954, 1.0, 0.877], gains_cool=[1.0, 0.8, 1.0])
+
+    assert mix.gains_at(370) == mix.gains  # 2700 K
+    assert mix.gains_at(500) == mix.gains  # warmer: the warm set
+    assert mix.gains_at(154) == mix.gains_cool  # 6500 K
+    middle = mix.gains_at(262)
+    assert all(min(w, c) <= m <= max(w, c) for w, c, m in zip(mix.gains, mix.gains_cool, middle))
+    single = ColourMix.build([0.9, 1.0, 0.8])
+    assert single.gains_at(154) == single.gains
+
+
+def test_old_reference_keys_are_tolerated(tmp_path):
+    names = devices_file(tmp_path, "3:\n  friendly_name: x\n  model: MiBoxer DL-X\n")
+    assert names.get_lamp_settings(3)["friendly_name"] == "x"

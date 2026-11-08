@@ -82,8 +82,6 @@ class Lamp:
         self._emulated_rgbw = None
 
         settings = dict(settings) if isinstance(settings, dict) else {}
-        self.model = settings.get("model")
-        self.strip = settings.get("strip")
         colour_settings = settings.get("colour") or {}
         # "mixed", "native", "off", or None to choose automatically.
         self.colour_temp_setting = colour_settings.get("colour_temp")
@@ -92,6 +90,7 @@ class Lamp:
             colour_settings.get("rgb_gains"),
             colour_settings.get("white_kelvin"),
             self._kelvin_range,
+            colour_settings.get("rgb_gains_cool"),
         )
         if self.is_group and not colour_settings and self.members:
             mixes = {m.mix for m in self.members}
@@ -367,16 +366,14 @@ class Lamp:
         }
         if self.device_types:
             attributes["device_types"] = self.device_types
-        if self.model:
-            attributes["model"] = self.model
-        if self.strip:
-            attributes["strip"] = self.strip
         if self.colour is not None:
             attributes["colour_features"] = str(self.colour)
         if self.has_colour_temp:
             attributes["colour_temp"] = "mixed" if self.colour_temp_emulated else "native"
             if self.colour_temp_emulated:
                 attributes["rgb_gains"] = [round(g, 3) for g in self.mix.gains]
+                if self.mix.gains_cool is not None:
+                    attributes["rgb_gains_cool"] = [round(g, 3) for g in self.mix.gains_cool]
                 if self.mix.white_kelvin:
                     attributes["white_kelvin"] = self.mix.white_kelvin
         return attributes
@@ -625,9 +622,8 @@ class Lamp:
             addr_str = str(self.short_address)
         else:
             addr_str = str(self.short_address.address)
-        model = f"model: {self.model}, " if self.model else ""
         text = (
-            f"{self.device_name} - address: {addr_str}, {model}"
+            f"{self.device_name} - address: {addr_str}, "
             f"actual brightness level: {self.level} (minimum: {self.min_level}, "
             f"max: {self.max_level}, physical minimum: {self.min_physical_level})"
         )

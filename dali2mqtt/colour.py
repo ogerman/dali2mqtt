@@ -52,6 +52,8 @@ TC_SANE = (40, 1250)
 TC_DEFAULT_RANGE = (153, 370)
 # Range of the colour temperature mixed from RGBW channels: 6500 K .. 2000 K.
 TC_EMULATED_RANGE = (153, 500)
+# Colour temperatures (mirek) at which rgb_gains and rgb_gains_cool apply.
+GAIN_ANCHORS_MIREK = (370, 154)  # 2700 K, 6500 K
 # Red, green, blue factors applied to the black body colour of a mixed colour
 # temperature, see set_rgb_gains.
 _rgb_gains = (1.0, 1.0, 1.0)
@@ -149,25 +151,38 @@ def kelvin_to_rgb(kelvin):
 class ColourMix:
     """How a colour temperature is mixed from a strip's RGBW channels.
 
-    ``gains`` are the strip's red, green, blue factors (see set_rgb_gains),
-    ``white_kelvin`` the colour temperature of its white LED (None: assume
-    the warm end of the range) and ``mirek_range`` the (coolest, warmest)
-    range offered.
+    ``gains`` are the strip's red, green, blue factors at 2700 K and
+    ``gains_cool`` those at 6500 K (see set_rgb_gains); in between they are
+    interpolated by mirek. One set rarely fits both ends: on the nf strips
+    the 2700 K mix matching the room's 2700 K lights is near the textbook
+    one, while the textbook 6500 K looks minty. ``white_kelvin`` is the
+    colour temperature of the white LED (None: assume the warm end of the
+    range) and ``mirek_range`` the (coolest, warmest) range offered.
     """
 
     gains: tuple = (1.0, 1.0, 1.0)
     white_kelvin: int = None
     mirek_range: tuple = TC_EMULATED_RANGE
+    gains_cool: tuple = None
 
     @classmethod
-    def build(cls, gains=None, white_kelvin=None, kelvin_range=None):
+    def build(cls, gains=None, white_kelvin=None, kelvin_range=None, gains_cool=None):
         """Return a mix; unset values come from the global defaults."""
         gains = _normalised_gains(gains) if gains is not None else _rgb_gains
+        gains_cool = _normalised_gains(gains_cool) if gains_cool is not None else None
         mirek_range = TC_EMULATED_RANGE
         if kelvin_range is not None:
             low, high = sorted(kelvin_range)
             mirek_range = (round(1_000_000 / high), round(1_000_000 / low))
-        return cls(gains, white_kelvin, mirek_range)
+        return cls(gains, white_kelvin, mirek_range, gains_cool)
+
+    def gains_at(self, mirek):
+        """Return the red, green, blue factors for a colour temperature."""
+        if self.gains_cool is None:
+            return self.gains
+        warm, cool = GAIN_ANCHORS_MIREK
+        t = min(max((mirek - cool) / (warm - cool), 0.0), 1.0)  # 0 at 6500 K, 1 at 2700 K
+        return tuple(c + (w - c) * t for w, c in zip(self.gains, self.gains_cool))
 
 
 def _normalised_gains(gains):
@@ -198,7 +213,7 @@ def colour_temp_to_rgbw(mirek, mix=None):
     For RGBW gear whose own colour temperature mode doesn't work: on the
     real bus office-rgb and living-room-rgb render every Tc as the same
     warm white. The RGB channels make the black body colour, corrected by
-    the strip's factors (``mix.gains``). The W channel, a white LED of
+    the strip's factors (``mix.gains_at``). The W channel, a white LED of
     ``mix.white_kelvin``, is used fully from its own colour temperature down
     to the warm end and faded out towards the cool end, where it would tint
     the white. ``mix`` defaults to the global settings.
@@ -206,7 +221,7 @@ def colour_temp_to_rgbw(mirek, mix=None):
     mix = mix or ColourMix.build()
     coolest, warmest = mix.mirek_range
     mirek = min(max(int(mirek), coolest), warmest)
-    rgb = [c * g for c, g in zip(kelvin_to_rgb(1_000_000 / mirek), mix.gains)]
+    rgb = [c * g for c, g in zip(kelvin_to_rgb(1_000_000 / mirek), mix.gains_at(mirek))]
     top = max(rgb) or 1
     red, green, blue = (round(c * 255 / top) for c in rgb)
     white_mirek = warmest

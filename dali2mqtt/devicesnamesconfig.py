@@ -18,27 +18,29 @@ def _kelvin_range(value):
 
 KELVIN = vol.All(vol.Coerce(int), vol.Range(min=1000, max=20000))
 
-# Per-lamp settings next to friendly_name, for what can't be read from the bus.
+GAINS = vol.All(
+    [vol.All(vol.Coerce(float), vol.Range(min=0.05, max=1.0))],
+    vol.Length(min=3, max=3),
+)
+
+# Per-lamp settings next to friendly_name, for what changes how dali2mqtt
+# drives the lamp and can't be read from the bus.
 LAMP_SETTINGS_SCHEMA = vol.Schema(
     {
         vol.Optional("friendly_name"): vol.Coerce(str),
-        # Reference only, published as entity attributes.
-        vol.Optional("model"): vol.Coerce(str),
-        vol.Optional("strip"): vol.Coerce(str),
-        vol.Optional("colour"): {
-            # Colour temperature of the strip's white LED.
+        # Strict: a misspelt colour setting is reported, not silently ignored.
+        vol.Optional("colour"): vol.Schema({
+            # Colour temperature the strip's white LED really shows.
             vol.Optional("white_kelvin"): KELVIN,
-            # Red, green, blue white balance of the strip.
-            vol.Optional("rgb_gains"): vol.All(
-                [vol.All(vol.Coerce(float), vol.Range(min=0.05, max=1.0))],
-                vol.Length(min=3, max=3),
-            ),
+            # Red, green, blue white balance of the strip at 2700 K and 6500 K.
+            vol.Optional("rgb_gains"): GAINS,
+            vol.Optional("rgb_gains_cool"): GAINS,
             # mixed: from the RGBW channels; native: the gear's own; off: none.
             vol.Optional("colour_temp"): vol.In(["mixed", "native", "off"]),
             vol.Optional("colour_temp_range"): vol.All(
                 [KELVIN], vol.Length(min=2, max=2), _kelvin_range
             ),
-        },
+        }, extra=vol.PREVENT_EXTRA),
     },
     extra=vol.ALLOW_EXTRA,
 )
