@@ -9,6 +9,7 @@ from dali2mqtt import colour
 from dali2mqtt.consts import (
     ALL_SUPPORTED_LOG_LEVELS,
     LOG_FORMAT,
+    MQTT_ATTRIBUTES_TOPIC,
     MQTT_AVAILABLE,
     MQTT_BRIGHTNESS_COMMAND_TOPIC,
     MQTT_BRIGHTNESS_STATE_TOPIC,
@@ -44,10 +45,14 @@ class Lamp:
         friendly_name,
         short_address,
         members=None,
+        settings=None,
     ):
         """Initialize Lamp.
 
         For a group, ``members`` are the Lamp objects of its member lamps.
+        ``settings`` are the lamp's validated entry from the devices file
+        (model, strip, colour); a group without its own takes its members'
+        colour settings when they all agree.
         """
         self.driver = driver
         # Home Assistant unique ids carry the DALI driver's class name; a Bus
@@ -76,6 +81,26 @@ class Lamp:
         # RGBW levels last sent to render a colour temperature, see colour_temp_emulated.
         self._emulated_rgbw = None
 
+        settings = dict(settings) if isinstance(settings, dict) else {}
+        self.model = settings.get("model")
+        self.strip = settings.get("strip")
+        colour_settings = settings.get("colour") or {}
+        # "mixed", "native", "off", or None to choose automatically.
+        self.colour_temp_setting = colour_settings.get("colour_temp")
+        self._kelvin_range = colour_settings.get("colour_temp_range")
+        self.mix = colour.ColourMix.build(
+            colour_settings.get("rgb_gains"),
+            colour_settings.get("white_kelvin"),
+            self._kelvin_range,
+        )
+        if self.is_group and not colour_settings and self.members:
+            mixes = {m.mix for m in self.members}
+            modes = {m.colour_temp_setting for m in self.members}
+            if len(mixes) == 1:
+                self.mix = mixes.pop()
+            if len(modes) == 1:
+                self.colour_temp_setting = modes.pop()
+
         self.device_name = slugify(friendly_name)
 
         logger.setLevel(ALL_SUPPORTED_LOG_LEVELS[log_level])
@@ -85,6 +110,8 @@ class Lamp:
             self.min_physical_level = None
             self.min_level, self.max_level = self._group_range(members)
             self.colour, self.colour_temp_range = self._group_colour(members)
+            if self.colour is not None and self.colour_temp_emulated:
+                self.colour_temp_range = self.mix.mirek_range
             # Set level directly without calling setter (which would send DAPC command)
             self.__level = 0  # Default to off, can't query actual level for groups
             logger.debug("Initialized group lamp %s with default values", friendly_name)
@@ -128,8 +155,13 @@ class Lamp:
         self.colour = colour.query_colour_features(self.driver, self.short_address)
         if self.colour is None:
             return
+        if self.colour_temp_setting == "mixed" and not self.has_rgbw:
+            logger.warning(
+                "%s: colour_temp mixed needs four RGBWAF channels, it has %s",
+                self.friendly_name, self.colour.rgbwaf_channels,
+            )
         if self.colour_temp_emulated:
-            self.colour_temp_range = colour.TC_EMULATED_RANGE
+            self.colour_temp_range = self.mix.mirek_range
         elif colour.COLOR_TEMP in self.colour.types:
             self.colour_temp_range = colour.query_colour_temp_range(
                 self.driver, self.short_address
@@ -142,6 +174,12 @@ class Lamp:
                     self.friendly_name,
                     *colour.TC_DEFAULT_RANGE,
                 )
+            if self._kelvin_range is not None:
+                # The configured range narrows what the gear renders.
+                coolest = max(self.colour_temp_range[0], self.mix.mirek_range[0])
+                warmest = min(self.colour_temp_range[1], self.mix.mirek_range[1])
+                if coolest <= warmest:
+                    self.colour_temp_range = (coolest, warmest)
         self.update_colour(colour.read_colour_state(self.driver, self.short_address))
 
     @staticmethod
@@ -178,8 +216,6 @@ class Lamp:
             rgbwaf_channels=min(m.colour.rgbwaf_channels for m in members),
             auto_activation=all(m.colour.auto_activation for m in members),
         )
-        if colour.RGBWAF in features.types and features.rgbwaf_channels >= 4:
-            return features, colour.TC_EMULATED_RANGE
         ranges = [m.colour_temp_range for m in members]
         if colour.COLOR_TEMP not in features.types or any(r is None for r in ranges):
             return features, None
@@ -199,6 +235,7 @@ class Lamp:
         """Return True if the lamp's colour temperature can be set."""
         return (
             self.colour is not None
+            and self.colour_temp_setting != "off"
             and (colour.COLOR_TEMP in self.colour.types or self.colour_temp_emulated)
             and self.colour_temp_range is not None
         )
@@ -207,9 +244,13 @@ class Lamp:
     def colour_temp_emulated(self):
         """Return True when colour temperature is mixed from the RGBW channels.
 
-        Done for all RGBW gear: the RGBW gear on the real bus claims colour
-        temperature support but renders every value as one warm white.
+        Done for RGBW gear unless the devices file says ``colour_temp: native``
+        (or ``off``): the RGBW gear on the real bus, MiBoxer DL-X in RGBW
+        mode, claims colour temperature support but can only drive its one
+        white channel with it.
         """
+        if self.colour_temp_setting in ("native", "off"):
+            return False
         return self.has_rgbw
 
     @property
@@ -261,6 +302,7 @@ class Lamp:
             "avty_t": MQTT_DALI2MQTT_STATUS.format(mqtt_base_topic),
             "pl_avail": MQTT_AVAILABLE,
             "pl_not_avail": MQTT_NOT_AVAILABLE,
+            "json_attr_t": MQTT_ATTRIBUTES_TOPIC.format(mqtt_base_topic, self.device_name),
             "device": {
                 "ids": "dali2mqtt",
                 "name": "DALI Lights",
@@ -313,6 +355,31 @@ class Lamp:
                 mqtt_base_topic, self.device_name
             )
         return json.dumps(json_config)
+
+    def ha_attributes(self):
+        """Return the facts Home Assistant shows as the entity's attributes."""
+        attributes = {
+            "dali_address": (
+                f"group {self.short_address.group}"
+                if self.is_group
+                else self.short_address.address
+            ),
+        }
+        if self.device_types:
+            attributes["device_types"] = self.device_types
+        if self.model:
+            attributes["model"] = self.model
+        if self.strip:
+            attributes["strip"] = self.strip
+        if self.colour is not None:
+            attributes["colour_features"] = str(self.colour)
+        if self.has_colour_temp:
+            attributes["colour_temp"] = "mixed" if self.colour_temp_emulated else "native"
+            if self.colour_temp_emulated:
+                attributes["rgb_gains"] = [round(g, 3) for g in self.mix.gains]
+                if self.mix.white_kelvin:
+                    attributes["white_kelvin"] = self.mix.white_kelvin
+        return attributes
 
     def actual_level(self):
         """Retrieve actual level from ballast."""
@@ -447,7 +514,9 @@ class Lamp:
             return False
         coolest, warmest = self.colour_temp_range
         mirek = min(max(int(mirek), coolest), warmest)
-        levels = tuple(colour.ha_to_dim(v) for v in colour.colour_temp_to_rgbw(mirek))
+        levels = tuple(
+            colour.ha_to_dim(v) for v in colour.colour_temp_to_rgbw(mirek, self.mix)
+        )
         if levels != self.__rgbw:
             return False
         self._emulated_rgbw = levels
@@ -499,7 +568,7 @@ class Lamp:
         coolest, warmest = self.colour_temp_range
         mirek = min(max(int(mirek), coolest), warmest)
         if self.colour_temp_emulated:
-            values = colour.colour_temp_to_rgbw(mirek)
+            values = colour.colour_temp_to_rgbw(mirek, self.mix)
             levels = self._apply_colour(
                 lambda: colour.set_rgbw(
                     self.driver, self.short_address, [colour.ha_to_dim(v) for v in values]
@@ -556,8 +625,9 @@ class Lamp:
             addr_str = str(self.short_address)
         else:
             addr_str = str(self.short_address.address)
+        model = f"model: {self.model}, " if self.model else ""
         text = (
-            f"{self.device_name} - address: {addr_str}, "
+            f"{self.device_name} - address: {addr_str}, {model}"
             f"actual brightness level: {self.level} (minimum: {self.min_level}, "
             f"max: {self.max_level}, physical minimum: {self.min_physical_level})"
         )

@@ -74,6 +74,28 @@ Example `devices.yaml`:
 ```
 Please note that MQTT topics support a minimum set of characters, therefore friendly names are converted to slug strings, so a lamp with address 0 (as an example) in MQTT will be named "lamp-in-kitchen"
 
+### Per-lamp settings
+Next to `friendly_name`, `devices.yaml` can describe what dali2mqtt can't read from the bus. Everything is optional; invalid settings are logged and ignored for that lamp.
+
+```yaml
+3:
+  friendly_name: office-rgb
+  model: MiBoxer DL-X                         # shown as an entity attribute
+  strip: Arlight RT-B60-10mm 24V RGBW-Warm    # shown as an entity attribute
+  colour:
+    white_kelvin: 2700             # colour temperature of the strip's white LED
+    rgb_gains: [1.0, 0.96, 0.62]   # red, green, blue white balance of the strip
+    colour_temp: mixed             # mixed, native or off (default: automatic)
+    colour_temp_range: [2000, 6500]
+```
+
+- `white_kelvin`: the white channel is used fully from this colour temperature down to the warm end of the range and fades out towards the cool end.
+- `rgb_gains`: overrides the global `colour_temp_rgb_gains` for this lamp, see below.
+- `colour_temp`: `mixed` mixes colour temperature from the RGBW channels (the default for RGBW gear), `native` uses the gear's own (for instance a MiBoxer DL-X in RGB+CCT mode, with separate cold and warm white strips), `off` hides the colour temperature control.
+- `colour_temp_range`: warmest and coolest kelvin offered; for native colour temperature it narrows the range the gear reports.
+
+Groups use the colour settings of their members when all members agree. Each light entity also gets attributes with its DALI address, device types, colour features and these settings.
+
 ### Colour (DT8 colour control gear)
 Lamps that implement DALI colour control (IEC 62386-209, device type 8) are detected at start-up. What Home Assistant gets depends on what the gear reports:
 

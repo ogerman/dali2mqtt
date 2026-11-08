@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 import random
 import re
@@ -47,6 +48,7 @@ from dali2mqtt.consts import (
     MIN_BACKOFF_TIME,
     MAX_BACKOFF_TIME,
     MIN_HASSEB_FIRMWARE_VERSION,
+    MQTT_ATTRIBUTES_TOPIC,
     MQTT_AVAILABLE,
     MQTT_BRIGHTNESS_COMMAND_TOPIC,
     MQTT_BRIGHTNESS_GET_COMMAND_TOPIC,
@@ -183,7 +185,7 @@ def initialize_lamps(data_object, client):
         len(lamps),
     )
 
-    def create_mqtt_lamp(address, name, members=None):
+    def create_mqtt_lamp(address, name, members=None, settings=None):
         try:
             lamp_object = Lamp(
                 log_level,
@@ -191,6 +193,7 @@ def initialize_lamps(data_object, client):
                 name,
                 address,
                 members,
+                settings,
             )
 
             previous = data_object["all_lamps"].get(name)
@@ -228,6 +231,11 @@ def initialize_lamps(data_object, client):
             ]
             for topic, payload, retain in mqtt_data:
                 client.publish(topic, payload, retain=retain)
+            client.publish(
+                MQTT_ATTRIBUTES_TOPIC.format(mqtt_base_topic, lamp_object.device_name),
+                json.dumps(lamp_object.ha_attributes()),
+                retain=True,
+            )
             publish_lamp_state(client, mqtt_base_topic, lamp_object)
 
             logger.info(lamp_object)
@@ -244,6 +252,7 @@ def initialize_lamps(data_object, client):
         lamps_by_address[lamp] = create_mqtt_lamp(
             short_address,
             devices_names_config.get_friendly_name(short_address.address),
+            settings=devices_names_config.get_lamp_settings(short_address.address),
         )
 
     groups = scan_groups(driver, lamps)

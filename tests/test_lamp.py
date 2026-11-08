@@ -78,6 +78,7 @@ def test_ha_config(fake_driver, fake_address):
         "avty_t": "test/status",
         "pl_avail": "online",
         "pl_not_avail": "offline",
+        "json_attr_t": "test/my-lamp/light/attributes",
         "device": {
             "ids": "dali2mqtt",
             "name": "DALI Lights",

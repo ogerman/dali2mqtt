@@ -1,11 +1,47 @@
 """Configuration Object."""
 import logging
 
+import voluptuous as vol
 import yaml
 from dali2mqtt.consts import ALL_SUPPORTED_LOG_LEVELS, LOG_FORMAT
 
 logging.basicConfig(format=LOG_FORMAT)
 logger = logging.getLogger(__name__)
+
+
+def _kelvin_range(value):
+    low, high = value
+    if low >= high:
+        raise vol.Invalid("colour_temp_range must be [warmest, coolest] kelvin, warmest first")
+    return [low, high]
+
+
+KELVIN = vol.All(vol.Coerce(int), vol.Range(min=1000, max=20000))
+
+# Per-lamp settings next to friendly_name, for what can't be read from the bus.
+LAMP_SETTINGS_SCHEMA = vol.Schema(
+    {
+        vol.Optional("friendly_name"): vol.Coerce(str),
+        # Reference only, published as entity attributes.
+        vol.Optional("model"): vol.Coerce(str),
+        vol.Optional("strip"): vol.Coerce(str),
+        vol.Optional("colour"): {
+            # Colour temperature of the strip's white LED.
+            vol.Optional("white_kelvin"): KELVIN,
+            # Red, green, blue white balance of the strip.
+            vol.Optional("rgb_gains"): vol.All(
+                [vol.All(vol.Coerce(float), vol.Range(min=0.05, max=1.0))],
+                vol.Length(min=3, max=3),
+            ),
+            # mixed: from the RGBW channels; native: the gear's own; off: none.
+            vol.Optional("colour_temp"): vol.In(["mixed", "native", "off"]),
+            vol.Optional("colour_temp_range"): vol.All(
+                [KELVIN], vol.Length(min=2, max=2), _kelvin_range
+            ),
+        },
+    },
+    extra=vol.ALLOW_EXTRA,
+)
 
 
 class DevicesNamesConfigLoadError(Exception):
@@ -69,6 +105,23 @@ class DevicesNamesConfig:
     def is_devices_file_empty(self) -> bool:
         """Check if we have any device configured."""
         return len(self._devices_names) == 0
+
+    def get_lamp_settings(self, short_address_value) -> dict:
+        """Return the validated settings of a lamp, {} when there are none.
+
+        Invalid settings are reported and ignored, so one typo doesn't stop
+        the lamp from working.
+        """
+        entry = self._devices_names.get(short_address_value)
+        if not isinstance(entry, dict):
+            return {}
+        try:
+            return LAMP_SETTINGS_SCHEMA(entry)
+        except vol.Invalid as err:
+            logger.error(
+                "Ignoring settings of lamp %s in %s: %s", short_address_value, self._path, err
+            )
+            return {}
 
     def get_friendly_name(self, short_address_value) -> str:
         """Retrieve friendly_name."""

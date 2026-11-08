@@ -13,6 +13,7 @@ levels are single bytes, 0..254, with 255 as MASK.
 """
 import logging
 import math
+from dataclasses import dataclass
 
 from dali.gear.colour import (
     Activate,
@@ -144,6 +145,39 @@ def kelvin_to_rgb(kelvin):
     return tuple(round(min(max(c, 0), 255)) for c in (red, green, blue))
 
 
+@dataclass(frozen=True)
+class ColourMix:
+    """How a colour temperature is mixed from a strip's RGBW channels.
+
+    ``gains`` are the strip's red, green, blue factors (see set_rgb_gains),
+    ``white_kelvin`` the colour temperature of its white LED (None: assume
+    the warm end of the range) and ``mirek_range`` the (coolest, warmest)
+    range offered.
+    """
+
+    gains: tuple = (1.0, 1.0, 1.0)
+    white_kelvin: int = None
+    mirek_range: tuple = TC_EMULATED_RANGE
+
+    @classmethod
+    def build(cls, gains=None, white_kelvin=None, kelvin_range=None):
+        """Return a mix; unset values come from the global defaults."""
+        gains = _normalised_gains(gains) if gains is not None else _rgb_gains
+        mirek_range = TC_EMULATED_RANGE
+        if kelvin_range is not None:
+            low, high = sorted(kelvin_range)
+            mirek_range = (round(1_000_000 / high), round(1_000_000 / low))
+        return cls(gains, white_kelvin, mirek_range)
+
+
+def _normalised_gains(gains):
+    gains = tuple(float(g) for g in gains)
+    if len(gains) != 3 or not all(0 < g for g in gains):
+        raise ValueError(f"need three positive factors, got {gains!r}")
+    top = max(gains)
+    return tuple(g / top for g in gains)
+
+
 def set_rgb_gains(gains):
     """Set the red, green, blue factors for mixed colour temperatures.
 
@@ -155,30 +189,33 @@ def set_rgb_gains(gains):
     matched the room's 4000 K ceiling lights.
     """
     global _rgb_gains  # pylint: disable=global-statement
-    gains = tuple(float(g) for g in gains)
-    if len(gains) != 3 or not all(0 < g for g in gains):
-        raise ValueError(f"need three positive factors, got {gains!r}")
-    top = max(gains)
-    _rgb_gains = tuple(g / top for g in gains)
+    _rgb_gains = _normalised_gains(gains)
 
 
-def colour_temp_to_rgbw(mirek):
+def colour_temp_to_rgbw(mirek, mix=None):
     """Return Home Assistant RGBW values (0..255) that render ``mirek``.
 
     For RGBW gear whose own colour temperature mode doesn't work: on the
     real bus office-rgb and living-room-rgb render every Tc as the same
     warm white. The RGB channels make the black body colour, corrected by
-    the strip's factors (set_rgb_gains); their W
-    channel is a warm white LED (about 3000 K), so it is blended in fully
-    at the warm end and faded out towards 6500 K, where it would tint the
-    white.
+    the strip's factors (``mix.gains``). The W channel, a white LED of
+    ``mix.white_kelvin``, is used fully from its own colour temperature down
+    to the warm end and faded out towards the cool end, where it would tint
+    the white. ``mix`` defaults to the global settings.
     """
-    coolest, warmest = TC_EMULATED_RANGE
+    mix = mix or ColourMix.build()
+    coolest, warmest = mix.mirek_range
     mirek = min(max(int(mirek), coolest), warmest)
-    rgb = [c * g for c, g in zip(kelvin_to_rgb(1_000_000 / mirek), _rgb_gains)]
+    rgb = [c * g for c, g in zip(kelvin_to_rgb(1_000_000 / mirek), mix.gains)]
     top = max(rgb) or 1
     red, green, blue = (round(c * 255 / top) for c in rgb)
-    warmth = (mirek - coolest) / (warmest - coolest)  # 0 at 6500 K, 1 at 2000 K
+    white_mirek = warmest
+    if mix.white_kelvin:
+        white_mirek = min(max(1_000_000 / mix.white_kelvin, coolest), warmest)
+    if white_mirek <= coolest:
+        warmth = 1.0
+    else:  # 0 at the cool end, 1 from the white LED's own colour temperature
+        warmth = min(max((mirek - coolest) / (white_mirek - coolest), 0.0), 1.0)
     white = round(255 * warmth)
     return red, green, blue, white
 
