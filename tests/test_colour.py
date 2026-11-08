@@ -157,6 +157,13 @@ def test_lamp_with_a_mock_driver_still_initializes():
     assert lamp.colour is None
 
 
+def test_physical_limits_stand_in_for_unset_rendered_limits():
+    lamp, _ = make_lamp(device_types=(8,), tc_range=(153, 370), tc_limits_set=False, tc=250)
+
+    assert lamp.colour_temp_range == (153, 370)
+    assert lamp.has_colour_temp
+
+
 # RGBW
 
 

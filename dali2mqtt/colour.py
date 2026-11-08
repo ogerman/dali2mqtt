@@ -189,15 +189,19 @@ def query_colour_temp_range(bus, address):
     """Return (coolest, warmest) in mirek, or None when unknown.
 
     These are the limits the gear renders, which may be narrower than its
-    physical ones. Coolest is the lower number.
+    physical ones; gear that leaves them at MASK falls back to the physical
+    limits. Coolest is the lower number.
     """
-    keys = (Q.ColourTemperatureTcCoolest, Q.ColourTemperatureTcWarmest)
-    values = query_colour_values(bus, address, keys)
-    coolest, warmest = (values.get(key) for key in keys)
-    if coolest is None or warmest is None or coolest > warmest:
+    for keys in (
+        (Q.ColourTemperatureTcCoolest, Q.ColourTemperatureTcWarmest),
+        (Q.ColourTemperatureTcPhysicalCoolest, Q.ColourTemperatureTcPhysicalWarmest),
+    ):
+        values = query_colour_values(bus, address, keys)
+        coolest, warmest = (values.get(key) for key in keys)
+        if coolest is not None and warmest is not None and coolest <= warmest:
+            return coolest, warmest
         logger.debug("No colour temperature range from %s: %s", address, values)
-        return None
-    return coolest, warmest
+    return None
 
 
 def read_colour_state(bus, address):
